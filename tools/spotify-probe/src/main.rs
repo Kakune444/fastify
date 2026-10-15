@@ -55,7 +55,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         session.shutdown();
         return Ok(());
     }
-    let backend = audio_backend::find(Some("rodio")).ok_or("No audio backend")?;
+    let backend = audio_backend::find(Some("rodio".to_owned())).ok_or("No audio backend")?;
     let player = Player::new(
         PlayerConfig::default(),
         session.clone(),
