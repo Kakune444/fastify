@@ -12,6 +12,7 @@ import {
 } from "./lib/catalog.ts";
 import "./style.css";
 import { SavedTracks } from "./lib/saved.ts";
+import { PlaylistDialogs } from "./ui/playlists.ts";
 
 type Status = {
   connected: boolean;
@@ -35,7 +36,11 @@ type Playback = {
 };
 type Collection = {
   name: string;
-  tracks: NativeTrack[];
+  description: string;
+  revision: string | null;
+  canEditMetadata: boolean;
+  canEditItems: boolean;
+  tracks: (NativeTrack & { position: number })[];
   total: number;
   offset: number;
 };
@@ -67,6 +72,39 @@ const savedTracks = new SavedTracks();
 let activeView = "home";
 let likedTokens = [""];
 let likedIndex = 0;
+let likedOffsets = [0];
+let selectedCollection: { card: Card; data: Collection } | null = null;
+let playlistPending = false;
+let drag: {
+  uri: string;
+  playlist: string;
+  revision: string;
+  position: number;
+} | null = null;
+const playlists = new PlaylistDialogs({
+  changed: (uri) => {
+    void loadLibrary();
+    if (activeView === "collection" && selectedCollection?.card.uri === uri) {
+      const { card } = selectedCollection;
+      void openCollection(card, collectionOffset);
+    }
+  },
+  created: (card) => {
+    void loadLibrary();
+    void openCollection(card);
+  },
+  error: showError,
+  pending: (value) => {
+    playlistPending = value;
+    document
+      .querySelectorAll<HTMLButtonElement>(
+        "[data-menu], #edit-playlist, #create-playlist",
+      )
+      .forEach((button) => {
+        button.disabled = value || !status.nativeReady;
+      });
+  },
+});
 const likedCard: Card = {
   uri: "spotify:collection:tracks",
   name: "Titres likés",
@@ -78,6 +116,7 @@ const likedCard: Card = {
 
 const paths: Record<string, string> = {
   saved: '<circle cx="12" cy="12" r="10"/><path d="m7 12 3 3 7-7"/>',
+  more: '<circle cx="4" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="20" cy="12" r="1"/>',
   add: '<circle cx="12" cy="12" r="10"/><path d="M7 12h10M12 7v10"/>',
   home: '<path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-6v-7h-4v7H4a1 1 0 0 1-1-1Z"/>',
   search: '<circle cx="10.5" cy="10.5" r="7.5"/><path d="m16 16 5 5"/>',
@@ -114,7 +153,7 @@ byId("app").innerHTML = `
   </header>
   <div class="workspace">
     <aside class="library pane" aria-label="Bibliothèque">
-      <div class="library-heading">${icon("library")}<h2>Bibliothèque</h2></div>
+      <div class="library-heading">${icon("library")}<h2>Bibliothèque</h2><button id="create-playlist" class="round" title="Créer une playlist" aria-label="Créer une playlist" disabled>+</button></div>
       <div class="chips library-filters"><button class="chip active" data-library="all">Tout</button><button class="chip" data-library="playlist">Playlists</button><button class="chip" data-library="album">Albums</button><button class="chip" data-library="artist">Artistes</button></div>
       <div id="library-list" class="library-list"><div class="library-empty"><strong>Votre bibliothèque vous attend</strong><p>Connectez-vous pour retrouver votre musique.</p></div></div>
     </aside>
@@ -164,6 +203,8 @@ function renderAccount(): void {
   byId("account").innerHTML = status.connected
     ? `<details class="profile"><summary title="Compte">${esc((status.username || "F")[0].toUpperCase())}</summary><button id="disconnect">Se déconnecter</button></details>`
     : '<button class="pill white" id="connect">Se connecter</button>';
+  byId<HTMLButtonElement>("create-playlist").disabled =
+    !status.nativeReady || playlistPending;
 }
 
 function welcome(): void {
@@ -199,6 +240,7 @@ function renderLibrary(): void {
 }
 
 function savedButton(uri: string): string {
+  if (!uri.startsWith("spotify:track:")) return "<span></span>";
   return `<button class="save-button" data-save="${esc(uri)}" aria-label="Vérification des favoris" disabled>${icon("add")}</button>`;
 }
 function updateSavedButtons(): void {
@@ -232,7 +274,7 @@ async function refreshSaved(uris?: string[]): Promise<void> {
           .map((c) => c.uri)
           .concat(playback.track ? [playback.track.uri] : []),
     ),
-  ];
+  ].filter((uri) => /^spotify:track:[A-Za-z0-9]{22}$/.test(uri));
   for (let offset = 0; offset < requested.length; offset += 50) {
     const batch = requested.slice(offset, offset + 50);
     const snapshot = savedTracks.snapshot(batch);
@@ -279,7 +321,7 @@ function cardGrid(items: Card[]): string {
     .map((card) => {
       const content = `<span class="artwork">${cover(card)}<span class="card-play">${icon("play")}</span></span><strong>${esc(card.name)}</strong><span class="card-subtitle">${esc(card.subtitle)}</span>`;
       return card.kind === "track"
-        ? `<article class="music-card track-card"><button class="card-main" data-uri="${esc(card.uri)}">${content}</button>${savedButton(card.uri)}</article>`
+        ? `<article class="music-card track-card"><button class="card-main" data-uri="${esc(card.uri)}">${content}</button>${savedButton(card.uri)}${menuButton(card.uri)}</article>`
         : `<button class="music-card" data-uri="${esc(card.uri)}">${content}</button>`;
     })
     .join("")}</div>`;
@@ -379,8 +421,92 @@ function nativeCard(track: NativeTrack): Card {
   };
 }
 
-function trackList(tracks: NativeTrack[], offset: number): string {
-  return `<div class="tracklist"><div class="tracklist-heading"><span>#</span><span>Titre</span><span>Album</span><span></span><span>${icon("clock")}</span></div>${tracks.map((track, index) => `<div class="track-row"><button class="row-play" data-play="${esc(track.uri)}"><span class="track-index">${offset + index + 1}</span><span class="row-name">${cover({ image: track.image, name: track.name, kind: "track" })}<span><strong>${esc(track.name)}</strong><small>${esc(track.artist)}</small></span></span></button><span class="album-name">${esc(track.album)}</span>${savedButton(track.uri)}<span>${formatTime(track.durationMs)}</span></div>`).join("")}</div>`;
+function menuButton(uri: string, position?: number): string {
+  if (!uri.startsWith("spotify:track:")) return "<span></span>";
+  return `<button class="icon-button track-menu-button" data-menu="${esc(uri)}" ${position === undefined ? "" : `data-position="${position}"`} aria-label="Plus d’options" ${!status.nativeReady || playlistPending ? "disabled" : ""}>${icon("more")}</button>`;
+}
+function closeTrackMenu(): void {
+  document.querySelector(".track-menu")?.remove();
+}
+function openTrackMenu(button: HTMLElement): void {
+  closeTrackMenu();
+  const uri = button.dataset.menu!;
+  const position =
+    button.dataset.position === undefined
+      ? null
+      : Number(button.dataset.position);
+  const snapshot = activeView === "collection" ? selectedCollection : null;
+  const menu = document.createElement("div");
+  menu.className = "track-menu";
+  menu.setAttribute("role", "menu");
+  menu.innerHTML = `<button role="menuitem" data-action="add">Ajouter à une playlist</button>${snapshot?.data.canEditItems && position !== null ? '<button role="menuitem" data-action="remove">Supprimer de cette playlist</button>' : ""}`;
+  document.body.append(menu);
+  const rect = button.getBoundingClientRect();
+  menu.style.left = `${Math.max(8, Math.min(rect.right - menu.offsetWidth, window.innerWidth - menu.offsetWidth - 8))}px`;
+  menu.style.top = `${Math.max(8, Math.min(rect.bottom + 4, window.innerHeight - menu.offsetHeight - 8))}px`;
+  menu.querySelector<HTMLButtonElement>("button")?.focus();
+  menu.addEventListener("click", (event) => {
+    const action = (event.target as HTMLElement).closest<HTMLButtonElement>(
+      "[data-action]",
+    )?.dataset.action;
+    if (!action) return;
+    closeTrackMenu();
+    if (action === "add") void playlists.add(uri);
+    if (action === "remove" && snapshot?.data.revision && position !== null)
+      void playlists.change(snapshot.card.uri, snapshot.data.revision, {
+        kind: "remove",
+        position,
+        uri,
+      });
+  });
+  menu.addEventListener("keydown", (event) => {
+    const buttons = [...menu.querySelectorAll<HTMLButtonElement>("button")];
+    if (event.key === "Escape") {
+      closeTrackMenu();
+      button.focus();
+    }
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      const index = buttons.indexOf(
+        document.activeElement as HTMLButtonElement,
+      );
+      buttons[
+        (index + (event.key === "ArrowDown" ? 1 : -1) + buttons.length) %
+          buttons.length
+      ]?.focus();
+    }
+  });
+}
+function moveTrack(position: number, to: number, uri: string): void {
+  const snapshot = selectedCollection;
+  if (
+    playlistPending ||
+    activeView !== "collection" ||
+    !snapshot?.data.canEditItems ||
+    !snapshot.data.revision ||
+    to < 0 ||
+    to >= snapshot.data.total ||
+    to === position
+  )
+    return;
+  void playlists.change(snapshot.card.uri, snapshot.data.revision, {
+    kind: "move",
+    position,
+    to,
+    uri,
+  });
+}
+function trackList(
+  tracks: NativeTrack[],
+  offset: number,
+  editable = false,
+): string {
+  return `<div class="tracklist"><div class="tracklist-heading"><span>#</span><span>Titre</span><span>Album</span><span></span><span>${icon("clock")}</span><span></span></div>${tracks
+    .map((track, index) => {
+      const position = offset + index;
+      return `<div class="track-row" ${editable ? `draggable="true" tabindex="0" data-position="${position}" data-track="${esc(track.uri)}" title="Glissez pour déplacer · Alt + ↑ ou ↓"` : ""}><button class="row-play" data-play="${esc(track.uri)}"><span class="track-index">${position + 1}</span><span class="row-name">${cover({ image: track.image, name: track.name, kind: "track" })}<span><strong>${esc(track.name)}</strong><small>${esc(track.artist)}</small></span></span></button><span class="album-name">${esc(track.album)}</span>${savedButton(track.uri)}<span>${formatTime(track.durationMs)}</span>${menuButton(track.uri, editable ? position : undefined)}</div>`;
+    })
+    .join("")}</div>`;
 }
 
 async function openLiked(index = 0): Promise<void> {
@@ -399,12 +525,13 @@ async function openLiked(index = 0): Promise<void> {
     likedIndex = index;
     if (result.nextToken) likedTokens[index + 1] = result.nextToken;
     else likedTokens.length = index + 1;
+    likedOffsets[index + 1] = likedOffsets[index] + result.tracks.length;
     collectionTracks = result.tracks.map(nativeCard);
     cards.clear();
     remember(library);
     remember(collectionTracks);
     byId("main-content").innerHTML =
-      `<div class="collection-header liked-header">${cover(likedCard)}<div><p>Playlist</p><h1>Titres likés</h1></div></div>${result.tracks.length ? trackList(result.tracks, index * 40) : '<div class="empty"><p>Aucun titre sur cette page.</p></div>'}<div class="pagination"><button class="pill" id="liked-prev" ${index === 0 ? "disabled" : ""}>Précédent</button><span>Page ${index + 1}</span><button class="pill" id="liked-next" ${!result.nextToken ? "disabled" : ""}>Suivant</button></div>`;
+      `<div class="collection-header liked-header">${cover(likedCard)}<div><p>Playlist</p><h1>Titres likés</h1></div></div>${result.tracks.length ? trackList(result.tracks, likedOffsets[index] ?? 0) : '<div class="empty"><p>Aucun titre sur cette page.</p></div>'}<div class="pagination"><button class="pill" id="liked-prev" ${index === 0 ? "disabled" : ""}>Précédent</button><span>Page ${index + 1}</span><button class="pill" id="liked-next" ${!result.nextToken ? "disabled" : ""}>Suivant</button></div>`;
     updateSavedButtons();
     void refreshSaved();
     updateControls();
@@ -425,7 +552,16 @@ async function openCollection(card: Card, offset = 0): Promise<void> {
       offset,
     });
     if (id !== requestId) return;
+    if (offset > 0 && offset >= result.total) {
+      await openCollection(
+        card,
+        Math.max(0, Math.floor((result.total - 1) / 40) * 40),
+      );
+      return;
+    }
     activeView = "collection";
+    card = { ...card, name: result.name };
+    selectedCollection = { card, data: result };
     collectionUri = card.uri;
     collectionOffset = result.offset;
     collectionTotal = result.total;
@@ -434,9 +570,10 @@ async function openCollection(card: Card, offset = 0): Promise<void> {
     remember(library);
     remember([card, ...collectionTracks]);
     byId("main-content").innerHTML =
-      `<div class="collection-header">${cover(card)}<div><p>${esc(card.kind === "album" ? "Album" : "Playlist")}</p><h1>${esc(result.name)}</h1><p>${result.total} titres</p></div></div>
-      ${trackList(result.tracks, offset)}
-      <div class="pagination"><button class="pill" id="collection-prev" ${offset === 0 ? "disabled" : ""}>Précédent</button><span>${offset + 1}–${Math.min(offset + 40, result.total)} sur ${result.total}</span><button class="pill" id="collection-next" ${offset + 40 >= result.total ? "disabled" : ""}>Suivant</button></div>`;
+      `<div class="collection-header">${cover(card)}<div><p>${esc(card.kind === "album" ? "Album" : "Playlist")}</p><h1>${esc(result.name)}</h1>${result.description ? `<p class="playlist-description">${esc(result.description)}</p>` : ""}<p>${result.total} titres</p></div></div>
+      ${result.canEditMetadata ? '<div class="collection-actions"><button class="pill" id="edit-playlist">Modifier les informations</button></div>' : ""}
+      ${trackList(result.tracks, offset, result.canEditItems)}
+      <div class="pagination"><button class="pill" id="collection-prev" ${offset === 0 ? "disabled" : ""}>Précédent</button><span>${result.total ? offset + 1 : 0}–${Math.min(offset + 40, result.total)} sur ${result.total}</span><button class="pill" id="collection-next" ${offset + 40 >= result.total ? "disabled" : ""}>Suivant</button></div>`;
     updateControls();
     updateSavedButtons();
     void refreshSaved();
@@ -494,7 +631,7 @@ function updateControls(): void {
 function renderPlayback(): void {
   const track = playback.track;
   byId("track-info").innerHTML = track
-    ? `${cover({ image: track.image, name: track.name, kind: "track" })}<span class="track-label"><strong>${esc(track.name)}</strong><small>${esc(track.artist)}</small></span>${savedButton(track.uri)}`
+    ? `${cover({ image: track.image, name: track.name, kind: "track" })}<span class="track-label"><strong>${esc(track.name)}</strong><small>${esc(track.artist)}</small></span>${savedButton(track.uri)}${menuButton(track.uri)}`
     : "";
   byId("now-playing").innerHTML = track
     ? `${cover({ image: track.image, name: track.name, kind: "track" })}<h3>${esc(track.name)}</h3><p>${esc(track.artist)}</p><div class="album-caption"><small>Album</small><p>${esc(track.album)}</p></div>`
@@ -545,11 +682,36 @@ byId<HTMLInputElement>("search").addEventListener("input", (event) => {
   }, 350);
 });
 document.addEventListener("click", async (event) => {
+  if (!(event.target as HTMLElement).closest(".track-menu, [data-menu]"))
+    closeTrackMenu();
   const button = (event.target as HTMLElement).closest<HTMLElement>(
     "button, a.brand",
   );
   if (!button) return;
+  if (button instanceof HTMLButtonElement && button.disabled) return;
   const id = button.id;
+  if (button.dataset.menu) {
+    openTrackMenu(button);
+    return;
+  }
+  if (id === "create-playlist") {
+    playlists.details();
+    return;
+  }
+  if (
+    id === "edit-playlist" &&
+    selectedCollection?.data.canEditMetadata &&
+    selectedCollection.data.revision
+  ) {
+    const { card, data } = selectedCollection;
+    playlists.details({
+      uri: card.uri,
+      name: data.name,
+      description: data.description,
+      revision: data.revision!,
+    });
+    return;
+  }
   if (button.matches("a.brand") || id === "home" || id === "retry-home") {
     event.preventDefault();
     clearTimeout(searchTimer);
@@ -558,6 +720,8 @@ document.addEventListener("click", async (event) => {
   }
   if (id === "connect" || id === "welcome-connect") void connect(true);
   if (id === "disconnect") {
+    playlists.close();
+    selectedCollection = null;
     savedTracks.clear();
     try {
       await invoke("disconnect_spotify");
@@ -588,6 +752,7 @@ document.addEventListener("click", async (event) => {
   }
   if (id === "liked-tracks") {
     likedTokens = [""];
+    likedOffsets = [0];
     void openLiked();
   }
   if (id === "liked-prev") void openLiked(Math.max(0, likedIndex - 1));
@@ -655,19 +820,96 @@ byId<HTMLInputElement>("volume").addEventListener("change", (event) => {
   void command("volume", Number((event.target as HTMLInputElement).value));
 });
 document.addEventListener("keydown", (event) => {
+  const target = event.target as HTMLElement;
+  if (target.closest("dialog, input, textarea, [contenteditable='true']"))
+    return;
+  if (event.altKey && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
+    const row = target.closest<HTMLElement>(".track-row[data-position]");
+    if (row) {
+      event.preventDefault();
+      const position = Number(row.dataset.position);
+      moveTrack(
+        position,
+        position + (event.key === "ArrowUp" ? -1 : 1),
+        row.dataset.track!,
+      );
+    }
+    return;
+  }
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
     event.preventDefault();
     byId<HTMLInputElement>("search").focus();
   }
   if (
     event.code === "Space" &&
-    !(event.target instanceof HTMLInputElement) &&
+    !target.closest("button, [role='menu']") &&
     playback.track
   ) {
     event.preventDefault();
     void command(playback.playing ? "pause" : "play");
   }
 });
+document.addEventListener("dragstart", (event) => {
+  const row = (event.target as HTMLElement).closest<HTMLElement>(
+    ".track-row[draggable='true']",
+  );
+  if (!row || playlistPending || !selectedCollection?.data.revision) {
+    event.preventDefault();
+    return;
+  }
+  drag = {
+    uri: row.dataset.track!,
+    position: Number(row.dataset.position),
+    playlist: selectedCollection.card.uri,
+    revision: selectedCollection.data.revision,
+  };
+  event.dataTransfer?.setData("text/plain", drag.uri);
+  if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+  row.classList.add("dragging");
+  closeTrackMenu();
+});
+document.addEventListener("dragover", (event) => {
+  const row = (event.target as HTMLElement).closest<HTMLElement>(
+    ".track-row[draggable='true']",
+  );
+  if (
+    row &&
+    drag?.playlist === selectedCollection?.card.uri &&
+    !playlistPending
+  ) {
+    event.preventDefault();
+    document.querySelector(".drop-target")?.classList.remove("drop-target");
+    row.classList.add("drop-target");
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+  }
+});
+document.addEventListener("drop", (event) => {
+  const row = (event.target as HTMLElement).closest<HTMLElement>(
+    ".track-row[draggable='true']",
+  );
+  const source = drag;
+  if (
+    row &&
+    source &&
+    source.playlist === selectedCollection?.card.uri &&
+    source.revision === selectedCollection.data.revision
+  ) {
+    event.preventDefault();
+    moveTrack(source.position, Number(row.dataset.position), source.uri);
+  }
+  drag = null;
+  document
+    .querySelectorAll(".dragging, .drop-target")
+    .forEach((element) => element.classList.remove("dragging", "drop-target"));
+});
+document.addEventListener("dragend", () => {
+  drag = null;
+  document
+    .querySelectorAll(".dragging, .drop-target")
+    .forEach((element) => element.classList.remove("dragging", "drop-target"));
+});
+window.addEventListener("resize", closeTrackMenu);
+byId("content").addEventListener("scroll", closeTrackMenu);
 
 function updatePosition(): void {
   const position = Math.min(

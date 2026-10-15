@@ -2,7 +2,7 @@ use futures_util::{StreamExt, stream};
 use librespot_core::{
     SpotifyUri, authentication::Credentials, config::SessionConfig, session::Session,
 };
-use librespot_metadata::{Album, Metadata, Playlist, Track};
+use librespot_metadata::{Album, Metadata, Track};
 use librespot_oauth::OAuthClientBuilder;
 use librespot_playback::{
     audio_backend,
@@ -25,6 +25,7 @@ use tauri::{Emitter, Manager, State};
 use tokio::sync::{Mutex, Semaphore};
 mod library_api;
 use library_api::{LibraryApi, LibraryError};
+use library_api::{PlaylistEdit, playlist_permissions, revision_hex};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -132,11 +133,22 @@ struct Status {
     username: Option<String>,
 }
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct Collection {
     name: String,
-    tracks: Vec<TrackView>,
+    description: String,
+    revision: Option<String>,
+    can_edit_metadata: bool,
+    can_edit_items: bool,
+    tracks: Vec<CollectionTrack>,
     total: usize,
     offset: usize,
+}
+#[derive(Serialize)]
+struct CollectionTrack {
+    #[serde(flatten)]
+    track: TrackView,
+    position: usize,
 }
 
 #[derive(Serialize)]
@@ -555,7 +567,7 @@ async fn get_library(state: State<'_, Arc<Backend>>, offset: Option<usize>) -> R
     let root =
         librespot_protocol::playlist4_external::SelectedListContent::parse_from_bytes(&bytes)
             .map_err(network_error)?;
-    let mut page = library_page(&root, offset);
+    let mut page = library_page(&root, offset, &session.username());
     let uris: Vec<_> = page["items"]
         .as_array()
         .into_iter()
@@ -590,6 +602,7 @@ async fn get_library(state: State<'_, Arc<Backend>>, offset: Option<usize>) -> R
 fn library_page(
     root: &librespot_protocol::playlist4_external::SelectedListContent,
     offset: usize,
+    username: &str,
 ) -> Value {
     let contents = root.contents.as_ref();
     let items: Vec<Value> = contents
@@ -607,7 +620,9 @@ fn library_page(
                     .filter(|n| !n.is_empty())
                     .unwrap_or("Playlist");
                 let owner = meta.map(|m| m.owner_username()).unwrap_or("");
-                Some(json!({"uri":uri,"name":name,"ownerV2":{"data":{"name":owner}}}))
+                let own = !username.is_empty() && owner == username;
+                let editable = meta.and_then(|m| m.capabilities.as_ref()).and_then(|c| c.can_edit_items).unwrap_or(own);
+                Some(json!({"uri":uri,"name":name,"ownerV2":{"data":{"name":owner}},"canEditItems":editable}))
             })
         })
         .collect();
@@ -684,8 +699,90 @@ async fn get_liked_tracks(
                 .await,
         )
         .await?;
+    drop(_slot);
     let tracks = state.track_views(&session, uris).await?;
     Ok(LikedPage { tracks, next_token })
+}
+
+#[tauri::command]
+async fn get_writable_playlists(state: State<'_, Arc<Backend>>) -> Result<Value> {
+    let _slot = state.requests.acquire().await.map_err(network_error)?;
+    let session = state.session().await?;
+    let mut items = Vec::new();
+    let mut offset = 0;
+    // Explicitly opening the picker fetches lightweight playlist names, not track contents.
+    for _ in 0..20 {
+        let bytes = tokio::time::timeout(
+            Duration::from_secs(15),
+            session.spclient().get_rootlist(offset, Some(1000)),
+        )
+        .await
+        .map_err(network_error)?
+        .map_err(network_error)?;
+        let root =
+            librespot_protocol::playlist4_external::SelectedListContent::parse_from_bytes(&bytes)
+                .map_err(network_error)?;
+        let page = library_page(&root, offset, &session.username());
+        if let Some(page_items) = page["items"].as_array() {
+            items.extend(
+                page_items
+                    .iter()
+                    .filter(|item| item["canEditItems"] == true)
+                    .cloned(),
+            );
+        }
+        let Some(next) = page["nextOffset"].as_u64() else {
+            return Ok(json!({"items":items}));
+        };
+        offset = next as usize;
+    }
+    Err(error(
+        "LIBRARY_TOO_LARGE",
+        "Cette bibliothèque ne peut pas être chargée entièrement pour le moment.",
+    ))
+}
+
+#[tauri::command]
+async fn edit_playlist(
+    state: State<'_, Arc<Backend>>,
+    uri: String,
+    revision: Option<String>,
+    edit: PlaylistEdit,
+) -> Result<()> {
+    let _write = state.writes.lock().await;
+    let _slot = state.requests.acquire().await.map_err(network_error)?;
+    state.check_library_cooldown().await?;
+    let session = state.session().await?;
+    state
+        .library_result(
+            LibraryApi::new(&session, &state.client)
+                .edit_playlist(&uri, revision.as_deref(), &edit)
+                .await,
+        )
+        .await?;
+    state.cache.lock().await.clear();
+    Ok(())
+}
+
+#[tauri::command]
+async fn create_playlist(
+    state: State<'_, Arc<Backend>>,
+    name: String,
+    description: String,
+) -> Result<String> {
+    let _write = state.writes.lock().await;
+    let _slot = state.requests.acquire().await.map_err(network_error)?;
+    state.check_library_cooldown().await?;
+    let session = state.session().await?;
+    let uri = state
+        .library_result(
+            LibraryApi::new(&session, &state.client)
+                .create_playlist(&name, &description)
+                .await,
+        )
+        .await?;
+    state.cache.lock().await.clear();
+    Ok(uri)
 }
 
 #[tauri::command]
@@ -696,20 +793,53 @@ async fn open_collection(
 ) -> Result<Collection> {
     let session = state.session().await?;
     let id = SpotifyUri::from_uri(&uri).map_err(|_| error("INPUT", "Lien Spotify invalide."))?;
-    let (name, ids): (String, Vec<SpotifyUri>) = match id {
+    if offset > 100_000 {
+        return Err(error("INPUT", "Page de playlist invalide."));
+    }
+    let (name, description, revision, can_edit_metadata, can_edit_items, total, uris) = match id {
         SpotifyUri::Album { .. } => {
             let item = tokio::time::timeout(Duration::from_secs(15), Album::get(&session, &id))
                 .await
                 .map_err(network_error)?
                 .map_err(network_error)?;
-            (item.name.clone(), item.tracks().cloned().collect())
+            let uris: Vec<_> = item.tracks().filter_map(|id| id.to_uri().ok()).collect();
+            let total = uris.len();
+            (
+                item.name.clone(),
+                String::new(),
+                None,
+                false,
+                false,
+                total,
+                uris.into_iter().skip(offset).take(40).collect(),
+            )
         }
         SpotifyUri::Playlist { .. } => {
-            let item = tokio::time::timeout(Duration::from_secs(15), Playlist::get(&session, &id))
-                .await
-                .map_err(network_error)?
-                .map_err(network_error)?;
-            (item.name().to_owned(), item.tracks().cloned().collect())
+            let _slot = state.requests.acquire().await.map_err(network_error)?;
+            state.check_library_cooldown().await?;
+            let item = state
+                .library_result(
+                    LibraryApi::new(&session, &state.client)
+                        .playlist_page(&uri, offset, 40)
+                        .await,
+                )
+                .await?;
+            let (metadata, items) = playlist_permissions(&item, &session.username());
+            let attributes = item.attributes.get_or_default();
+            let uris = item
+                .contents
+                .as_ref()
+                .map(|c| c.items.iter().map(|i| i.uri().to_owned()).collect())
+                .unwrap_or_default();
+            (
+                attributes.name().to_owned(),
+                attributes.description().to_owned(),
+                Some(revision_hex(item.revision())),
+                metadata,
+                items,
+                item.length().max(0) as usize,
+                uris,
+            )
         }
         _ => {
             return Err(error(
@@ -718,31 +848,22 @@ async fn open_collection(
             ));
         }
     };
-    let total = ids.len();
-    let tracks: Vec<_> = stream::iter(ids.into_iter().skip(offset).take(40))
-        .map(|id| {
-            let session = session.clone();
-            let metadata = &state.metadata;
-            async move {
-                tokio::time::timeout(Duration::from_secs(15), async {
-                    let _slot = metadata
-                        .acquire()
-                        .await
-                        .map_err(|_| librespot_core::Error::unavailable("Metadata queue closed"))?;
-                    Track::get(&session, &id).await
-                })
-                .await
-                .ok()
-                .and_then(|r| r.ok())
-                .map(track_view)
-            }
+    let tracks = state
+        .track_views(&session, uris)
+        .await?
+        .into_iter()
+        .enumerate()
+        .map(|(index, track)| CollectionTrack {
+            track,
+            position: offset + index,
         })
-        .buffered(4)
-        .filter_map(|item| async move { item })
-        .collect()
-        .await;
+        .collect();
     Ok(Collection {
         name,
+        description,
+        revision,
+        can_edit_metadata,
+        can_edit_items,
         tracks,
         total,
         offset,
@@ -833,6 +954,9 @@ pub fn run() {
             get_saved_status,
             set_saved_track,
             get_liked_tracks,
+            get_writable_playlists,
+            edit_playlist,
+            create_playlist,
             open_collection,
             play_track,
             player_command
@@ -883,7 +1007,7 @@ mod tests {
             contents.meta_items.push(meta);
         }
         root.contents = Some(contents).into();
-        let page = library_page(&root, 0);
+        let page = library_page(&root, 0, "owner");
         assert_eq!(page["items"].as_array().unwrap().len(), 1);
         assert_eq!(page["items"][0]["name"], "Ma playlist");
         assert_eq!(
@@ -895,8 +1019,32 @@ mod tests {
 
     #[test]
     fn empty_rootlist_does_not_repeat_the_same_page() {
-        let page = library_page(&SelectedListContent::new(), 40);
+        let page = library_page(&SelectedListContent::new(), 40, "owner");
         assert!(page["nextOffset"].is_null());
         assert!(page["items"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn playlist_picker_honors_an_explicit_denial_for_the_owner() {
+        let mut root = SelectedListContent::new();
+        let mut contents = ListItems::new();
+        let mut item = Item::new();
+        item.set_uri("spotify:playlist:37i9dQZF1DXcBWIGoYBM5M".into());
+        contents.items.push(item);
+        let mut meta = MetaItem::new();
+        meta.set_owner_username("owner".into());
+        contents.meta_items.push(meta);
+        root.contents = Some(contents).into();
+        assert_eq!(
+            library_page(&root, 0, "owner")["items"][0]["canEditItems"],
+            true
+        );
+        let mut caps = librespot_protocol::playlist_permission::Capabilities::new();
+        caps.set_can_edit_items(false);
+        root.contents.as_mut().unwrap().meta_items[0].capabilities = Some(caps).into();
+        assert_eq!(
+            library_page(&root, 0, "owner")["items"][0]["canEditItems"],
+            false
+        );
     }
 }

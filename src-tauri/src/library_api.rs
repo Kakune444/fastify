@@ -234,30 +234,43 @@ impl<'a> LibraryApi<'a> {
         request.set = "collection".into();
         request.pagination_token = token.into();
         request.limit = PAGE_SIZE;
-        let bytes = self
-            .request(
-                Method::POST,
-                "/collection/v2/paging",
-                COLLECTION_TYPE,
-                request
-                    .write_to_bytes()
-                    .map_err(|_| LibraryError::Protocol)?,
-                false,
-            )
-            .await?;
-        let page = PageResponse::parse_from_bytes(&bytes).map_err(|_| LibraryError::Protocol)?;
-        let uris = page
-            .items
-            .into_iter()
-            .filter(|item| !item.is_removed)
-            .filter_map(|item| track_uri(&item.uri).ok())
-            .collect();
-        let next = if page.next_page_token.is_empty() {
-            None
-        } else {
-            Some(page.next_page_token)
-        };
-        Ok((uris, next))
+        // The collection contains tombstones and other entity types. Skip empty
+        // track pages, while bounding the work and preserving the server cursor.
+        for page_index in 0..10 {
+            let bytes = self
+                .request(
+                    Method::POST,
+                    "/collection/v2/paging",
+                    COLLECTION_TYPE,
+                    request
+                        .write_to_bytes()
+                        .map_err(|_| LibraryError::Protocol)?,
+                    false,
+                )
+                .await?;
+            let page =
+                PageResponse::parse_from_bytes(&bytes).map_err(|_| LibraryError::Protocol)?;
+            let uris: Vec<String> = page
+                .items
+                .into_iter()
+                .filter(|item| !item.is_removed)
+                .filter_map(|item| track_uri(&item.uri).ok())
+                .collect();
+            let next = if page.next_page_token.is_empty() {
+                None
+            } else {
+                Some(page.next_page_token)
+            };
+            if !uris.is_empty() || next.is_none() || page_index == 9 {
+                return Ok((uris, next));
+            }
+            let next = next.unwrap();
+            if next == request.pagination_token {
+                return Err(LibraryError::Protocol);
+            }
+            request.pagination_token = next;
+        }
+        Err(LibraryError::Protocol)
     }
 
     pub async fn playlist_page(
@@ -675,6 +688,17 @@ pub fn track_uri(value: &str) -> Result<String> {
 }
 
 fn decode_contains(bytes: &[u8], expected: usize) -> Result<Vec<bool>> {
+    // Validate every field's framing before decoding packed booleans. The
+    // generated packed reader may accept EOF before its declared byte length.
+    let mut framing = protobuf::CodedInputStream::from_bytes(bytes);
+    let mut unknown = protobuf::UnknownFields::new();
+    while let Some(tag) = framing
+        .read_raw_tag_or_eof()
+        .map_err(|_| LibraryError::Protocol)?
+    {
+        protobuf::rt::read_unknown_or_skip_group(tag, &mut framing, &mut unknown)
+            .map_err(|_| LibraryError::Protocol)?;
+    }
     let found = ContainsResponse::parse_from_bytes(bytes)
         .map_err(|_| LibraryError::Protocol)?
         .found;
@@ -775,7 +799,10 @@ mod tests {
     #[test]
     fn contains_rejects_truncated_or_misaligned_answers() {
         for data in [&[10, 4, 1, 0][..], &[10, 1, 128][..], &[8, 1][..], &[0][..]] {
-            assert!(decode_contains(data, 2).is_err());
+            assert!(
+                decode_contains(data, 2).is_err(),
+                "accepted malformed frame: {data:?}"
+            );
         }
     }
     #[test]

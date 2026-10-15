@@ -737,7 +737,10 @@ input[type="range"]:disabled {
 .tracklist-heading,
 .track-row {
   display: grid;
-  grid-template-columns: 24px minmax(140px, 1.6fr) minmax(70px, 1fr) 28px 45px;
+  grid-template-columns: 24px minmax(140px, 1.6fr) minmax(
+      70px,
+      1fr
+    ) 28px 45px 28px;
   gap: 14px;
   align-items: center;
   width: 100%;
@@ -898,11 +901,191 @@ input[type="range"]:disabled {
   }
   .tracklist-heading,
   .track-row {
-    grid-template-columns: 22px minmax(150px, 1fr) 40px;
+    grid-template-columns: 22px minmax(100px, 1fr) 28px 40px 28px;
   }
   .tracklist-heading > span:nth-child(3) {
     display: none;
   }
+}
+.library-heading h2 {
+  flex: 1;
+}
+#create-playlist {
+  font-size: 26px;
+  width: 32px;
+  height: 32px;
+}
+.collection-actions {
+  padding: 18px 24px 0;
+}
+.playlist-description {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-width: 650px;
+  margin-bottom: 12px;
+}
+.track-menu-button {
+  width: 28px;
+  height: 28px;
+  flex: none;
+}
+.track-card > .track-menu-button {
+  position: absolute;
+  right: 12px;
+  bottom: 10px;
+}
+.track-card > .save-button {
+  right: 48px;
+}
+.track-row[draggable="true"] {
+  cursor: grab;
+}
+.track-row.dragging {
+  opacity: 0.45;
+}
+.track-row.drop-target {
+  box-shadow: inset 0 -2px #1ed760;
+  background: #ffffff10;
+}
+.track-row:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: -2px;
+}
+.track-menu {
+  position: fixed;
+  z-index: 30;
+  min-width: 240px;
+  max-width: 90vw;
+  padding: 4px;
+  background: #282828;
+  border-radius: 4px;
+  box-shadow: 0 12px 36px #0009;
+}
+.track-menu button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 13px 12px;
+  border-radius: 3px;
+  font-size: 14px;
+}
+.track-menu button:hover,
+.track-menu button:focus-visible {
+  background: #ffffff18;
+}
+.playlist-dialog {
+  color: #fff;
+  background: #282828;
+  border: 0;
+  border-radius: 8px;
+  padding: 24px;
+  width: min(480px, 90vw);
+  max-height: 80vh;
+  box-shadow: 0 20px 80px #0008;
+  margin: auto;
+}
+.playlist-dialog::backdrop {
+  background: #000a;
+}
+.dialog-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 24px;
+}
+.dialog-heading h2 {
+  font-size: 23px;
+}
+.dialog-close {
+  width: 32px;
+  height: 32px;
+  font-size: 26px;
+}
+.playlist-form label,
+.playlist-search {
+  display: grid;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 18px;
+}
+.playlist-dialog input,
+.playlist-dialog textarea {
+  width: 100%;
+  padding: 12px;
+  background: #3e3e3e;
+  color: #fff;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  font: inherit;
+  font-size: 14px;
+}
+.playlist-dialog input:focus,
+.playlist-dialog textarea:focus {
+  outline: none;
+  border-color: #aaa;
+  background: #333;
+}
+.playlist-dialog textarea {
+  resize: vertical;
+  min-height: 100px;
+  max-height: 30vh;
+}
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+.dialog-error {
+  font-size: 13px;
+  line-height: 1.5;
+  color: #ffb5ba;
+  margin-top: 16px;
+}
+.playlist-options {
+  max-height: 44vh;
+  overflow-y: auto;
+}
+.playlist-option {
+  display: flex;
+  align-items: center;
+  text-align: left;
+  width: 100%;
+  padding: 8px;
+  gap: 12px;
+  border-radius: 4px;
+}
+.playlist-option:hover,
+.playlist-option:focus-visible {
+  background: #ffffff14;
+}
+.playlist-option-art {
+  display: grid;
+  place-items: center;
+  background: #383838;
+  width: 48px;
+  height: 48px;
+  flex: none;
+  font-size: 26px;
+  color: #aaa;
+}
+.playlist-option strong,
+.playlist-option small {
+  display: block;
+  overflow-wrap: anywhere;
+}
+.playlist-option strong {
+  font-size: 15px;
+}
+.playlist-option small {
+  font-size: 12px;
+  color: #aaa;
+  margin-top: 5px;
+}
+.playlist-no-results {
+  color: #bbb;
+  font-size: 14px;
+  padding: 16px 8px;
 }
 @media (prefers-reduced-motion: reduce) {
   * {
