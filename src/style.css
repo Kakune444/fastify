@@ -267,7 +267,7 @@ h2 {
   overflow: hidden;
   white-space: nowrap;
 }
-.liked-cover {
+.cover.liked-cover {
   display: grid;
   place-items: center;
   background: linear-gradient(135deg, #450af5, #c4efd9);
@@ -278,7 +278,7 @@ h2 {
   height: 40%;
   fill: currentColor;
 }
-.liked-header {
+.collection-header.liked-header {
   background: linear-gradient(180deg, #503893, #30205a);
 }
 .save-button {
