@@ -52,6 +52,7 @@ let libraryNext: number | null = null;
 let libraryFilter = "all";
 let libraryLoading = false;
 let queue: Card[] = [];
+let collectionTracks: Card[] = [];
 let sections: Section[] = [];
 let cards = new Map<string, Card>();
 let requestId = 0;
@@ -282,8 +283,10 @@ async function openCollection(card: Card, offset = 0): Promise<void> {
     collectionUri = card.uri;
     collectionOffset = result.offset;
     collectionTotal = result.total;
-    queue = result.tracks.map(nativeCard);
-    remember(queue);
+    collectionTracks = result.tracks.map(nativeCard);
+    cards.clear();
+    remember(library);
+    remember([card, ...collectionTracks]);
     byId("main-content").innerHTML =
       `<div class="collection-header">${cover(card)}<div><p>${esc(card.kind === "album" ? "Album" : "Playlist")}</p><h1>${esc(result.name)}</h1><p>${result.total} titres</p></div></div>
       <div class="tracklist"><div class="tracklist-heading"><span>#</span><span>Titre</span><span>Album</span><span>${icon("clock")}</span></div>${result.tracks.map((track, index) => `<button class="track-row" data-play="${esc(track.uri)}"><span class="track-index">${offset + index + 1}</span><span class="row-name">${cover({ image: track.image, name: track.name, kind: "track" })}<span><strong>${esc(track.name)}</strong><small>${esc(track.artist)}</small></span></span><span class="album-name">${esc(track.album)}</span><span>${formatTime(track.durationMs)}</span></button>`).join("")}</div>
@@ -411,6 +414,7 @@ document.addEventListener("click", async (event) => {
       library = [];
       libraryNext = null;
       queue = [];
+      collectionTracks = [];
       cards.clear();
       playback = {
         track: null,
@@ -443,7 +447,10 @@ document.addEventListener("click", async (event) => {
         });
     }
   }
-  if (button.dataset.play) void play(button.dataset.play);
+  if (button.dataset.play) {
+    queue = [...collectionTracks];
+    void play(button.dataset.play);
+  }
   if (button.dataset.library) {
     document
       .querySelectorAll(".library-filters .chip")

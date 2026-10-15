@@ -15,7 +15,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 use tauri::{Emitter, Manager, State};
@@ -60,6 +63,8 @@ struct Backend {
     imported: Mutex<Option<ImportedAuth>>,
     connection: Mutex<()>,
     requests: Semaphore,
+    metadata: Semaphore,
+    selection: AtomicU64,
     cooldown: Mutex<Option<Instant>>,
     cache: Mutex<HashMap<String, (Instant, Value)>>,
     playback: Mutex<Playback>,
@@ -111,6 +116,8 @@ impl Backend {
             imported: Mutex::new(None),
             connection: Mutex::new(()),
             requests: Semaphore::new(3),
+            metadata: Semaphore::new(4),
+            selection: AtomicU64::new(0),
             cooldown: Mutex::new(None),
             cache: Mutex::new(HashMap::new()),
             playback: Mutex::new(Playback::default()),
@@ -348,6 +355,24 @@ async fn connect_spotify(
     tauri::async_runtime::spawn(async move {
         while let Some(event) = events.recv().await {
             let mut snapshot = shared.playback.lock().await;
+            let event_track = match &event {
+                PlayerEvent::Playing { track_id, .. }
+                | PlayerEvent::Paused { track_id, .. }
+                | PlayerEvent::PositionChanged { track_id, .. }
+                | PlayerEvent::Seeked { track_id, .. }
+                | PlayerEvent::Unavailable { track_id, .. }
+                | PlayerEvent::EndOfTrack { track_id, .. }
+                | PlayerEvent::Stopped { track_id, .. } => Some(track_id),
+                _ => None,
+            };
+            if event_track.is_some_and(|id| {
+                snapshot
+                    .track
+                    .as_ref()
+                    .is_none_or(|track| id.to_uri().ok().as_deref() != Some(track.uri.as_str()))
+            }) {
+                continue;
+            }
             match event {
                 PlayerEvent::Playing { position_ms, .. } => {
                     snapshot.playing = true;
@@ -386,6 +411,7 @@ async fn connect_spotify(
 #[tauri::command]
 async fn disconnect_spotify(state: State<'_, Arc<Backend>>) -> Result<()> {
     let _connection = state.connection.lock().await;
+    state.selection.fetch_add(1, Ordering::SeqCst);
     if let Some(native) = state.native.lock().await.take() {
         native.player.stop();
         native.session.shutdown();
@@ -561,12 +587,19 @@ async fn open_collection(
     let tracks: Vec<_> = stream::iter(ids.into_iter().skip(offset).take(40))
         .map(|id| {
             let session = session.clone();
+            let metadata = &state.metadata;
             async move {
-                tokio::time::timeout(Duration::from_secs(15), Track::get(&session, &id))
-                    .await
-                    .ok()
-                    .and_then(|r| r.ok())
-                    .map(track_view)
+                tokio::time::timeout(Duration::from_secs(15), async {
+                    let _slot = metadata
+                        .acquire()
+                        .await
+                        .map_err(|_| librespot_core::Error::unavailable("Metadata queue closed"))?;
+                    Track::get(&session, &id).await
+                })
+                .await
+                .ok()
+                .and_then(|r| r.ok())
+                .map(track_view)
             }
         })
         .buffered(4)
@@ -595,10 +628,20 @@ async fn play_track(
         ));
     }
     let session = state.session().await?;
-    let track = tokio::time::timeout(Duration::from_secs(15), Track::get(&session, &id))
-        .await
-        .map_err(network_error)?
-        .map_err(network_error)?;
+    let selection = state.selection.fetch_add(1, Ordering::SeqCst) + 1;
+    let track = tokio::time::timeout(Duration::from_secs(15), async {
+        let _slot = state.metadata.acquire().await.map_err(network_error)?;
+        Track::get(&session, &id).await.map_err(network_error)
+    })
+    .await
+    .map_err(network_error)??;
+    let native = state.native.lock().await;
+    if state.selection.load(Ordering::SeqCst) != selection {
+        return Ok(());
+    }
+    let native = native
+        .as_ref()
+        .ok_or_else(|| error("AUTH_REQUIRED", "Reconnectez-vous à Spotify."))?;
     let snapshot = Playback {
         track: Some(track_view(track)),
         loading: true,
@@ -606,12 +649,7 @@ async fn play_track(
     };
     *state.playback.lock().await = snapshot.clone();
     let _ = app.emit("playback", snapshot);
-    let native = state.native.lock().await;
-    native
-        .as_ref()
-        .ok_or_else(|| error("AUTH_REQUIRED", "Reconnectez-vous à Spotify."))?
-        .player
-        .load(id, true, 0);
+    native.player.load(id, true, 0);
     Ok(())
 }
 
