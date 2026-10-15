@@ -12,6 +12,8 @@ use librespot_playback::{
 use protobuf::Message;
 use serde::Deserialize;
 use std::{path::PathBuf, time::Duration};
+#[path = "../../../src-tauri/src/library_api.rs"]
+mod library_api;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -50,6 +52,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let session = Session::new(SessionConfig::default(), None);
     tokio::time::timeout(Duration::from_secs(30), session.connect(credentials, false)).await??;
     println!("SESSION_OK");
+    if std::env::args().any(|arg| arg == "--favorites" || arg == "--favorite-roundtrip") {
+        diagnose_favorites(&session).await?;
+    }
     if std::env::args().any(|arg| arg == "--library") {
         diagnose_library(&session).await?;
     }
@@ -93,6 +98,48 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     session.shutdown();
     result??;
     println!("PROBE_OK");
+    Ok(())
+}
+
+async fn diagnose_favorites(session: &Session) -> Result<(), Box<dyn std::error::Error>> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    let api = library_api::LibraryApi::new(session, &client);
+    let (uris, next) = api.liked_page("").await.map_err(|e| format!("{e:?}"))?;
+    println!(
+        "LIKED_PAGE_OK: tracks={} has_next={}",
+        uris.len(),
+        next.is_some()
+    );
+    let samples: Vec<String> = [
+        "spotify:track:2cGxRwrMyEAp8dEbuZaVv6",
+        "spotify:track:2LD2gT7gwAurzdQDQtILds",
+        "spotify:track:69kOkLUCkxIZYexIgSG8rq",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+    let saved = api.contains(&samples).await.map_err(|e| format!("{e:?}"))?;
+    println!("LIKED_STATUS_OK: checked={}", saved.len());
+    if !std::env::args().any(|arg| arg == "--favorite-roundtrip") {
+        return Ok(());
+    }
+    let index = saved
+        .iter()
+        .position(|saved| !saved)
+        .ok_or("All candidate tracks are already liked; leave them untouched")?;
+    let uri = &samples[index];
+    let added = api.set_saved(uri, true).await;
+    // This candidate was absent beforehand. Restore that state even after an uncertain response.
+    let restored = api.set_saved(uri, false).await;
+    if restored.is_err() {
+        println!("FAVORITE_RESTORE_FAILED");
+        return Err("Favorite test cleanup failed".into());
+    }
+    added.map_err(|e| format!("{e:?}"))?;
+    println!("FAVORITE_ROUNDTRIP_OK: add_and_remove_confirmed=true initial_state_restored=true");
     Ok(())
 }
 

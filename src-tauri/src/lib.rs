@@ -23,6 +23,8 @@ use std::{
 };
 use tauri::{Emitter, Manager, State};
 use tokio::sync::{Mutex, Semaphore};
+mod library_api;
+use library_api::{LibraryApi, LibraryError};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -46,6 +48,38 @@ fn network_error(_: impl std::fmt::Display) -> AppError {
     )
 }
 
+impl From<LibraryError> for AppError {
+    fn from(value: LibraryError) -> Self {
+        match value {
+            LibraryError::Input => error("INPUT", "Ces informations ne sont pas valides."),
+            LibraryError::Auth => error("AUTH_REQUIRED", "Reconnectez-vous à Spotify."),
+            LibraryError::Permission => error(
+                "PERMISSION",
+                "Vous n’avez pas les droits pour modifier cette playlist.",
+            ),
+            LibraryError::Missing => error("NOT_FOUND", "Cette playlist n’est plus disponible."),
+            LibraryError::Conflict => error(
+                "CONFLICT",
+                "La playlist a changé. Rechargez-la avant de recommencer.",
+            ),
+            LibraryError::RateLimited(wait) => AppError {
+                code: "RATE_LIMIT",
+                message: "Spotify demande de patienter avant de réessayer.",
+                retry_after_seconds: Some(wait),
+            },
+            LibraryError::Uncertain => error(
+                "UNCERTAIN",
+                "Spotify n’a pas confirmé la modification. Vérifiez son résultat avant de réessayer.",
+            ),
+            LibraryError::Protocol => error(
+                "API_CHANGED",
+                "La réponse Spotify a changé et doit être adaptée.",
+            ),
+            LibraryError::Network => network_error("network"),
+        }
+    }
+}
+
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ImportedAuth {
@@ -65,6 +99,7 @@ struct Backend {
     requests: Semaphore,
     metadata: Semaphore,
     selection: AtomicU64,
+    writes: Mutex<()>,
     cooldown: Mutex<Option<Instant>>,
     cache: Mutex<HashMap<String, (Instant, Value)>>,
     playback: Mutex<Playback>,
@@ -104,10 +139,59 @@ struct Collection {
     offset: usize,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LikedPage {
+    tracks: Vec<TrackView>,
+    next_token: Option<String>,
+}
+
 impl Backend {
+    async fn library_result<T>(&self, result: library_api::Result<T>) -> Result<T> {
+        if let Err(LibraryError::RateLimited(wait)) = &result {
+            *self.cooldown.lock().await = Some(Instant::now() + Duration::from_secs(*wait));
+        }
+        result.map_err(Into::into)
+    }
+    async fn check_library_cooldown(&self) -> Result<()> {
+        if let Some(until) = *self.cooldown.lock().await {
+            if until > Instant::now() {
+                return Err(
+                    LibraryError::RateLimited((until - Instant::now()).as_secs() + 1).into(),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    async fn track_views(&self, session: &Session, uris: Vec<String>) -> Result<Vec<TrackView>> {
+        let tracks: Vec<_> = stream::iter(uris)
+            .map(|uri| async move {
+                let parsed = SpotifyUri::from_uri(&uri).map_err(network_error)?;
+                let result = tokio::time::timeout(Duration::from_secs(15), async {
+                    let _slot = self.metadata.acquire().await.map_err(network_error)?;
+                    Track::get(session, &parsed).await.map_err(network_error)
+                })
+                .await;
+                Ok::<_, AppError>(match result {
+                    Ok(Ok(track)) => track_view(track),
+                    _ => TrackView {
+                        uri,
+                        name: "Titre indisponible".into(),
+                        ..TrackView::default()
+                    },
+                })
+            })
+            .buffered(4)
+            .collect()
+            .await;
+        tracks.into_iter().collect()
+    }
+
     fn new() -> Self {
         Self {
             client: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
                 .timeout(Duration::from_secs(15))
                 .connect_timeout(Duration::from_secs(5))
                 .build()
@@ -118,6 +202,7 @@ impl Backend {
             requests: Semaphore::new(3),
             metadata: Semaphore::new(4),
             selection: AtomicU64::new(0),
+            writes: Mutex::new(()),
             cooldown: Mutex::new(None),
             cache: Mutex::new(HashMap::new()),
             playback: Mutex::new(Playback::default()),
@@ -554,6 +639,56 @@ fn track_view(track: Track) -> TrackView {
 }
 
 #[tauri::command]
+async fn get_saved_status(state: State<'_, Arc<Backend>>, uris: Vec<String>) -> Result<Vec<bool>> {
+    let _slot = state.requests.acquire().await.map_err(network_error)?;
+    state.check_library_cooldown().await?;
+    let session = state.session().await?;
+    state
+        .library_result(
+            LibraryApi::new(&session, &state.client)
+                .contains(&uris)
+                .await,
+        )
+        .await
+}
+
+#[tauri::command]
+async fn set_saved_track(state: State<'_, Arc<Backend>>, uri: String, saved: bool) -> Result<()> {
+    let _write = state.writes.lock().await;
+    let _slot = state.requests.acquire().await.map_err(network_error)?;
+    state.check_library_cooldown().await?;
+    let session = state.session().await?;
+    state
+        .library_result(
+            LibraryApi::new(&session, &state.client)
+                .set_saved(&uri, saved)
+                .await,
+        )
+        .await?;
+    state.cache.lock().await.clear();
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_liked_tracks(
+    state: State<'_, Arc<Backend>>,
+    token: Option<String>,
+) -> Result<LikedPage> {
+    let _slot = state.requests.acquire().await.map_err(network_error)?;
+    state.check_library_cooldown().await?;
+    let session = state.session().await?;
+    let (uris, next_token) = state
+        .library_result(
+            LibraryApi::new(&session, &state.client)
+                .liked_page(token.as_deref().unwrap_or(""))
+                .await,
+        )
+        .await?;
+    let tracks = state.track_views(&session, uris).await?;
+    Ok(LikedPage { tracks, next_token })
+}
+
+#[tauri::command]
 async fn open_collection(
     state: State<'_, Arc<Backend>>,
     uri: String,
@@ -695,6 +830,9 @@ pub fn run() {
             get_home,
             search_catalog,
             get_library,
+            get_saved_status,
+            set_saved_track,
+            get_liked_tracks,
             open_collection,
             play_track,
             player_command

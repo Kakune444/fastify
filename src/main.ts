@@ -11,6 +11,7 @@ import {
   type Section,
 } from "./lib/catalog.ts";
 import "./style.css";
+import { SavedTracks } from "./lib/saved.ts";
 
 type Status = {
   connected: boolean;
@@ -62,8 +63,22 @@ let collectionUri = "";
 let collectionOffset = 0;
 let collectionTotal = 0;
 let lastPlaybackUpdate = performance.now();
+const savedTracks = new SavedTracks();
+let activeView = "home";
+let likedTokens = [""];
+let likedIndex = 0;
+const likedCard: Card = {
+  uri: "spotify:collection:tracks",
+  name: "Titres likés",
+  subtitle: "Playlist",
+  image: "",
+  kind: "liked",
+  durationMs: 0,
+};
 
 const paths: Record<string, string> = {
+  saved: '<circle cx="12" cy="12" r="10"/><path d="m7 12 3 3 7-7"/>',
+  add: '<circle cx="12" cy="12" r="10"/><path d="M7 12h10M12 7v10"/>',
   home: '<path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-6v-7h-4v7H4a1 1 0 0 1-1-1Z"/>',
   search: '<circle cx="10.5" cy="10.5" r="7.5"/><path d="m16 16 5 5"/>',
   library: '<path d="M4 3v18M9 3v18M14 4l5-1 3 17-5 1Z"/>',
@@ -137,6 +152,8 @@ function showError(value: unknown): void {
 }
 
 function cover(card: Pick<Card, "image" | "name" | "kind">, cls = ""): string {
+  if (card.kind === "liked")
+    return `<span class="cover liked-cover ${cls}">${icon("heart")}</span>`;
   const image = imageUrl(card.image);
   return image
     ? `<img class="cover ${cls} ${card.kind === "artist" ? "artist-cover" : ""}" src="${esc(image)}" alt="" loading="lazy" decoding="async"/>`
@@ -171,6 +188,86 @@ function renderLibrary(): void {
       "beforeend",
       `<button class="pill" id="library-more" ${libraryLoading ? "disabled" : ""}>Afficher plus</button>`,
     );
+  if (
+    status.connected &&
+    (libraryFilter === "all" || libraryFilter === "playlist")
+  )
+    byId("library-list").insertAdjacentHTML(
+      "afterbegin",
+      `<button class="library-item" id="liked-tracks">${cover(likedCard)}<span><strong>Titres likés</strong><small>Playlist</small></span></button>`,
+    );
+}
+
+function savedButton(uri: string): string {
+  return `<button class="save-button" data-save="${esc(uri)}" aria-label="Vérification des favoris" disabled>${icon("add")}</button>`;
+}
+function updateSavedButtons(): void {
+  document
+    .querySelectorAll<HTMLButtonElement>("[data-save]")
+    .forEach((button) => {
+      const uri = button.dataset.save!;
+      const value = savedTracks.get(uri);
+      const label = value
+        ? "Retirer des Titres likés"
+        : "Sauvegarder dans les Titres likés";
+      button.disabled =
+        !status.nativeReady || value === undefined || savedTracks.busy(uri);
+      button.classList.toggle("is-saved", !!value);
+      button.setAttribute("aria-pressed", String(!!value));
+      button.setAttribute(
+        "aria-label",
+        value === undefined ? "Vérification des favoris" : label,
+      );
+      button.title = label;
+      button.innerHTML = icon(value ? "saved" : "add");
+    });
+}
+async function refreshSaved(uris?: string[]): Promise<void> {
+  if (!status.nativeReady) return;
+  const requested = [
+    ...new Set(
+      uris ??
+        [...cards.values()]
+          .filter((c) => c.kind === "track")
+          .map((c) => c.uri)
+          .concat(playback.track ? [playback.track.uri] : []),
+    ),
+  ];
+  for (let offset = 0; offset < requested.length; offset += 50) {
+    const batch = requested.slice(offset, offset + 50);
+    const snapshot = savedTracks.snapshot(batch);
+    try {
+      const values = await invoke<boolean[]>("get_saved_status", {
+        uris: batch,
+      });
+      savedTracks.accept(batch, values, snapshot);
+      updateSavedButtons();
+    } catch (err) {
+      showError(err);
+      return;
+    }
+  }
+}
+async function toggleSaved(uri: string): Promise<void> {
+  const current = savedTracks.get(uri);
+  if (current === undefined || !status.nativeReady) return;
+  const operation = savedTracks.begin(uri);
+  if (operation === null) return;
+  updateSavedButtons();
+  try {
+    await invoke("set_saved_track", { uri, saved: !current });
+    savedTracks.finish(uri, operation, !current);
+    if (activeView === "liked") {
+      likedTokens = [""];
+      void openLiked();
+    }
+  } catch (err) {
+    savedTracks.finish(uri, operation);
+    showError(err);
+    void refreshSaved([uri]);
+  } finally {
+    updateSavedButtons();
+  }
 }
 
 function remember(items: Card[]): void {
@@ -178,13 +275,22 @@ function remember(items: Card[]): void {
 }
 function cardGrid(items: Card[]): string {
   remember(items);
-  return `<div class="card-grid">${items.map((card) => `<button class="music-card" data-uri="${esc(card.uri)}"><span class="artwork">${cover(card)}<span class="card-play">${icon("play")}</span></span><strong>${esc(card.name)}</strong><span>${esc(card.subtitle)}</span></button>`).join("")}</div>`;
+  return `<div class="card-grid">${items
+    .map((card) => {
+      const content = `<span class="artwork">${cover(card)}<span class="card-play">${icon("play")}</span></span><strong>${esc(card.name)}</strong><span class="card-subtitle">${esc(card.subtitle)}</span>`;
+      return card.kind === "track"
+        ? `<article class="music-card track-card"><button class="card-main" data-uri="${esc(card.uri)}">${content}</button>${savedButton(card.uri)}</article>`
+        : `<button class="music-card" data-uri="${esc(card.uri)}">${content}</button>`;
+    })
+    .join("")}</div>`;
 }
 function renderSections(items: Section[], title?: string): void {
   cards.clear();
   remember(library);
   byId("main-content").innerHTML =
     `${title ? `<h1 class="page-title">${esc(title)}</h1>` : '<div class="chips content-chips"><span class="chip active">Tout</span><span class="chip">Musique</span><span class="chip">Podcasts</span></div>'}${items.map((section) => `<section class="music-section"><h2>${esc(section.name)}</h2>${cardGrid(section.items)}</section>`).join("") || '<div class="empty"><h1>Aucun résultat</h1><p>Essayez une autre recherche.</p></div>'}`;
+  updateSavedButtons();
+  void refreshSaved();
 }
 
 async function loadHome(): Promise<void> {
@@ -201,6 +307,7 @@ async function loadHome(): Promise<void> {
     });
     if (id !== requestId) return;
     sections = homeSections(result);
+    activeView = "home";
     renderSections(sections);
   } catch (err) {
     if (id === requestId) {
@@ -223,6 +330,7 @@ async function search(query: string): Promise<void> {
     const result = await invoke("search_catalog", { query });
     if (id !== requestId) return;
     const groups = searchSections(result);
+    activeView = "search";
     renderSections(groups, `Résultats pour « ${query} »`);
   } catch (err) {
     if (id === requestId) {
@@ -270,6 +378,43 @@ function nativeCard(track: NativeTrack): Card {
     durationMs: track.durationMs,
   };
 }
+
+function trackList(tracks: NativeTrack[], offset: number): string {
+  return `<div class="tracklist"><div class="tracklist-heading"><span>#</span><span>Titre</span><span>Album</span><span></span><span>${icon("clock")}</span></div>${tracks.map((track, index) => `<div class="track-row"><button class="row-play" data-play="${esc(track.uri)}"><span class="track-index">${offset + index + 1}</span><span class="row-name">${cover({ image: track.image, name: track.name, kind: "track" })}<span><strong>${esc(track.name)}</strong><small>${esc(track.artist)}</small></span></span></button><span class="album-name">${esc(track.album)}</span>${savedButton(track.uri)}<span>${formatTime(track.durationMs)}</span></div>`).join("")}</div>`;
+}
+
+async function openLiked(index = 0): Promise<void> {
+  const token = likedTokens[index];
+  if (token === undefined) return;
+  const id = ++requestId;
+  byId("main-content").innerHTML =
+    '<div class="loading" role="status">Chargement des Titres likés…</div>';
+  try {
+    const result = await invoke<{
+      tracks: NativeTrack[];
+      nextToken: string | null;
+    }>("get_liked_tracks", { token });
+    if (id !== requestId) return;
+    activeView = "liked";
+    likedIndex = index;
+    if (result.nextToken) likedTokens[index + 1] = result.nextToken;
+    else likedTokens.length = index + 1;
+    collectionTracks = result.tracks.map(nativeCard);
+    cards.clear();
+    remember(library);
+    remember(collectionTracks);
+    byId("main-content").innerHTML =
+      `<div class="collection-header liked-header">${cover(likedCard)}<div><p>Playlist</p><h1>Titres likés</h1></div></div>${result.tracks.length ? trackList(result.tracks, index * 40) : '<div class="empty"><p>Aucun titre sur cette page.</p></div>'}<div class="pagination"><button class="pill" id="liked-prev" ${index === 0 ? "disabled" : ""}>Précédent</button><span>Page ${index + 1}</span><button class="pill" id="liked-next" ${!result.nextToken ? "disabled" : ""}>Suivant</button></div>`;
+    updateSavedButtons();
+    void refreshSaved();
+    updateControls();
+  } catch (err) {
+    if (id !== requestId) return;
+    byId("main-content").innerHTML =
+      '<div class="empty"><h1>Impossible de charger les Titres likés</h1><button class="pill white" id="liked-tracks">Réessayer</button></div>';
+    showError(err);
+  }
+}
 async function openCollection(card: Card, offset = 0): Promise<void> {
   const id = ++requestId;
   byId("main-content").innerHTML =
@@ -280,6 +425,7 @@ async function openCollection(card: Card, offset = 0): Promise<void> {
       offset,
     });
     if (id !== requestId) return;
+    activeView = "collection";
     collectionUri = card.uri;
     collectionOffset = result.offset;
     collectionTotal = result.total;
@@ -289,9 +435,11 @@ async function openCollection(card: Card, offset = 0): Promise<void> {
     remember([card, ...collectionTracks]);
     byId("main-content").innerHTML =
       `<div class="collection-header">${cover(card)}<div><p>${esc(card.kind === "album" ? "Album" : "Playlist")}</p><h1>${esc(result.name)}</h1><p>${result.total} titres</p></div></div>
-      <div class="tracklist"><div class="tracklist-heading"><span>#</span><span>Titre</span><span>Album</span><span>${icon("clock")}</span></div>${result.tracks.map((track, index) => `<button class="track-row" data-play="${esc(track.uri)}"><span class="track-index">${offset + index + 1}</span><span class="row-name">${cover({ image: track.image, name: track.name, kind: "track" })}<span><strong>${esc(track.name)}</strong><small>${esc(track.artist)}</small></span></span><span class="album-name">${esc(track.album)}</span><span>${formatTime(track.durationMs)}</span></button>`).join("")}</div>
+      ${trackList(result.tracks, offset)}
       <div class="pagination"><button class="pill" id="collection-prev" ${offset === 0 ? "disabled" : ""}>Précédent</button><span>${offset + 1}–${Math.min(offset + 40, result.total)} sur ${result.total}</span><button class="pill" id="collection-next" ${offset + 40 >= result.total ? "disabled" : ""}>Suivant</button></div>`;
     updateControls();
+    updateSavedButtons();
+    void refreshSaved();
   } catch (err) {
     if (id === requestId) {
       byId("main-content").innerHTML =
@@ -346,7 +494,7 @@ function updateControls(): void {
 function renderPlayback(): void {
   const track = playback.track;
   byId("track-info").innerHTML = track
-    ? `${cover({ image: track.image, name: track.name, kind: "track" })}<span><strong>${esc(track.name)}</strong><small>${esc(track.artist)}</small></span>`
+    ? `${cover({ image: track.image, name: track.name, kind: "track" })}<span class="track-label"><strong>${esc(track.name)}</strong><small>${esc(track.artist)}</small></span>${savedButton(track.uri)}`
     : "";
   byId("now-playing").innerHTML = track
     ? `${cover({ image: track.image, name: track.name, kind: "track" })}<h3>${esc(track.name)}</h3><p>${esc(track.artist)}</p><div class="album-caption"><small>Album</small><p>${esc(track.album)}</p></div>`
@@ -355,6 +503,8 @@ function renderPlayback(): void {
       "<p>Choisissez un titre<br/>pour commencer à écouter.</p></div>";
   byId("duration").textContent = formatTime(track?.durationMs || 0);
   updateControls();
+  updateSavedButtons();
+  if (track) void refreshSaved([track.uri]);
 }
 async function connect(interactive: boolean): Promise<void> {
   if (!isTauri()) {
@@ -408,6 +558,7 @@ document.addEventListener("click", async (event) => {
   }
   if (id === "connect" || id === "welcome-connect") void connect(true);
   if (id === "disconnect") {
+    savedTracks.clear();
     try {
       await invoke("disconnect_spotify");
       status = { connected: false, nativeReady: false, username: null };
@@ -431,6 +582,16 @@ document.addEventListener("click", async (event) => {
       showError(err);
     }
   }
+  if (button.dataset.save) {
+    void toggleSaved(button.dataset.save);
+    return;
+  }
+  if (id === "liked-tracks") {
+    likedTokens = [""];
+    void openLiked();
+  }
+  if (id === "liked-prev") void openLiked(Math.max(0, likedIndex - 1));
+  if (id === "liked-next") void openLiked(likedIndex + 1);
   if (button.dataset.uri) {
     const card =
       cards.get(button.dataset.uri) ||
@@ -474,6 +635,7 @@ document.addEventListener("click", async (event) => {
   }
   if (id === "show-queue") {
     ++requestId;
+    activeView = "queue";
     renderSections(
       [{ name: "File d’attente", items: queue }],
       "File d’attente",
