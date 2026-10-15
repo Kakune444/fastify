@@ -11,6 +11,8 @@ Projet indépendant, sans affiliation à Spotify ni au framework web Fastify.
 Prototype en développement. L'application Windows a été compilée et testée avec
 un compte réel : connexion OAuth, reconnexion après redémarrage, accueil,
 recherche, bibliothèque paginée, albums et playlists, lecture Rust, pause et déplacement dans le morceau.
+Les favoris et l’édition des playlists utilisent aussi les services internes Spotify :
+création privée, nom et description, ajout, retrait d’une occurrence et déplacement.
 Les autres parcours sont suivis dans [l'état des fonctions](docs/STATUS.md).
 **La parité Spotify n'est pas atteinte et aucun gain de performance global n'est
 encore démontré.**
@@ -42,6 +44,12 @@ npm run tauri build -- --no-bundle
 
 `npm run dev` affiche uniquement l'interface dans le navigateur. Les accès au compte
 et la lecture nécessitent l'application Windows. La CI compile sans compte Spotify.
+
+Dans l’application, « Titres likés » ouvre les favoris ; le bouton « + » de la
+bibliothèque crée une playlist. Le menu « … » d’un titre permet de l’ajouter à une
+playlist modifiable, ou de le retirer de la playlist ouverte. Les playlists
+modifiables proposent « Modifier les informations ». Glisser un titre change son
+ordre ; `Alt` + `↑` / `↓` déplace aussi la ligne qui a le focus.
 
 ## Suivi
 

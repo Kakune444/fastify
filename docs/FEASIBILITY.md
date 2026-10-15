@@ -83,3 +83,26 @@ de compte, titre écouté ni contenu de capture n'est publié.
 Le test natif valide une première lecture autonome, pas la parité Spotify. Les
 paroles, le hors ligne, la qualité sans perte et la totalité des appareils Connect
 ne sont pas validés. Ne pas présenter de commandes distantes comme un moteur audio.
+
+## Favoris et édition, 16 octobre 2026
+
+Les échanges collection utilisent `/collection/v2/contains`, `/write` et `/paging`
+avec le type `application/vnd.collection-v2.spotify.proto`. Les champs du protocole
+sont décrits dans [les schémas librespot](https://github.com/librespot-org/librespot/blob/v0.8.0/protocol/proto/collection2v2.proto)
+et corroborés par [le client go-librespot](https://github.com/devgianlu/go-librespot/blob/master/spclient/library_write.go).
+Le schéma collection présent dans les sources de librespot 0.8.0 n’est pas exporté
+par son module Rust compilé : Fastify génère le petit sous-ensemble nécessaire.
+
+L’édition utilise les opérations `ListChanges` du protocole playlist, accompagnées
+de la révision courante. La création par `POST /playlist/v2/playlist`, l’ajout dans
+la rootlist et le service de permission ont été relevés dans les ressources
+publiques du client [Spotify Web](https://open.spotify.com/), puis testés sur le
+compte local. L’implémentation de Fastify est propre au projet.
+
+La sonde confirme l’ajout et le retrait d’un favori. Une playlist privée temporaire
+a servi à vérifier le nom, la description, l’ajout, le retrait d’une occurrence
+dupliquée, le déplacement et le rejet d’une ancienne révision. Les contrôles
+relisent les données serveur ; aucune écriture n’est répétée automatiquement après
+une coupure réseau. La première page utile des favoris contient ici 38 titres,
+avec un curseur pour la suite. Ces résultats ne valident pas les autres fonctions
+de Spotify ni un gain de performance global.
