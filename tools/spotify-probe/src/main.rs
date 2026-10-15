@@ -52,6 +52,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let session = Session::new(SessionConfig::default(), None);
     tokio::time::timeout(Duration::from_secs(30), session.connect(credentials, false)).await??;
     println!("SESSION_OK");
+    if std::env::args().any(|arg| arg == "--playlist-roundtrip") {
+        diagnose_playlist(&session).await?;
+    }
     if std::env::args().any(|arg| arg == "--favorites" || arg == "--favorite-roundtrip") {
         diagnose_favorites(&session).await?;
     }
@@ -140,6 +143,129 @@ async fn diagnose_favorites(session: &Session) -> Result<(), Box<dyn std::error:
     }
     added.map_err(|e| format!("{e:?}"))?;
     println!("FAVORITE_ROUNDTRIP_OK: add_and_remove_confirmed=true initial_state_restored=true");
+    Ok(())
+}
+
+async fn diagnose_playlist(session: &Session) -> Result<(), Box<dyn std::error::Error>> {
+    use library_api::{LibraryApi, PlaylistEdit, revision_hex};
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    let api = LibraryApi::new(session, &client);
+    let uri = api
+        .create_playlist(
+            "Fastify — test édition",
+            "Validation temporaire de Fastify.",
+        )
+        .await
+        .map_err(|e| format!("{e:?}"))?;
+    println!("PLAYLIST_CREATED_PRIVATE");
+    if let Some(directory) = std::env::var_os("FASTIFY_DIAGNOSTIC_DIR") {
+        std::fs::create_dir_all(&directory)?;
+        std::fs::write(PathBuf::from(directory).join("test-playlist-uri.txt"), &uri)?;
+    }
+    let first = "spotify:track:2cGxRwrMyEAp8dEbuZaVv6".to_owned();
+    let second = "spotify:track:2LD2gT7gwAurzdQDQtILds".to_owned();
+    let result = async {
+        let page = api.playlist_page(&uri, 0, 10).await?;
+        let stale_revision = revision_hex(page.revision());
+        api.edit_playlist(
+            &uri,
+            Some(&stale_revision),
+            &PlaylistEdit::Details {
+                name: "Fastify — test renommé".into(),
+                description: "Description modifiée.".into(),
+            },
+        )
+        .await?;
+        println!("PLAYLIST_DETAILS_OK");
+        api.edit_playlist(
+            &uri,
+            None,
+            &PlaylistEdit::Add {
+                uris: vec![first.clone(), second.clone(), first.clone()],
+            },
+        )
+        .await?;
+        println!("PLAYLIST_ADD_OK");
+        let page = api.playlist_page(&uri, 0, 10).await?;
+        api.edit_playlist(
+            &uri,
+            Some(&revision_hex(page.revision())),
+            &PlaylistEdit::Remove {
+                position: 2,
+                uri: first.clone(),
+            },
+        )
+        .await?;
+        let page = api.playlist_page(&uri, 0, 10).await?;
+        if page.length() != 2
+            || page
+                .contents
+                .as_ref()
+                .and_then(|c| c.items.first())
+                .is_none_or(|i| i.uri() != first)
+        {
+            return Err(library_api::LibraryError::Protocol);
+        }
+        println!("PLAYLIST_REMOVE_ONE_DUPLICATE_OK");
+        api.edit_playlist(
+            &uri,
+            Some(&revision_hex(page.revision())),
+            &PlaylistEdit::Move {
+                position: 0,
+                to: 1,
+                uri: first.clone(),
+            },
+        )
+        .await?;
+        println!("PLAYLIST_MOVE_OK");
+        if !matches!(
+            api.edit_playlist(
+                &uri,
+                Some(&stale_revision),
+                &PlaylistEdit::Add {
+                    uris: vec![first.clone()]
+                }
+            )
+            .await,
+            Err(library_api::LibraryError::Conflict)
+        ) {
+            return Err(library_api::LibraryError::Protocol);
+        }
+        println!("PLAYLIST_STALE_REVISION_BLOCKED");
+        let page = api.playlist_page(&uri, 0, 10).await?;
+        api.edit_playlist(
+            &uri,
+            Some(&revision_hex(page.revision())),
+            &PlaylistEdit::Remove {
+                position: 1,
+                uri: first.clone(),
+            },
+        )
+        .await?;
+        let page = api.playlist_page(&uri, 0, 10).await?;
+        api.edit_playlist(
+            &uri,
+            Some(&revision_hex(page.revision())),
+            &PlaylistEdit::Remove {
+                position: 0,
+                uri: second.clone(),
+            },
+        )
+        .await?;
+        Ok::<(), library_api::LibraryError>(())
+    }
+    .await;
+    let cleanup = api.unlink_playlist(&uri).await;
+    if cleanup.is_err() {
+        println!("PLAYLIST_TEST_CLEANUP_FAILED");
+        return Err("Test playlist cleanup failed".into());
+    }
+    println!("PLAYLIST_TEST_REMOVED_FROM_LIBRARY");
+    result.map_err(|e| format!("{e:?}"))?;
+    println!("PLAYLIST_ROUNDTRIP_OK");
     Ok(())
 }
 

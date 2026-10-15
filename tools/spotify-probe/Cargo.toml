@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+[build-dependencies]
+protobuf-codegen = "3.7"
+
 [dependencies]
 librespot-core = { version = "=0.8.0", default-features = false, features = ["native-tls"] }
 librespot-metadata = "=0.8.0"

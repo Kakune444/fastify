@@ -1009,6 +1009,7 @@ dependencies = [
  "librespot-playback",
  "librespot-protocol",
  "protobuf",
+ "protobuf-codegen",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
