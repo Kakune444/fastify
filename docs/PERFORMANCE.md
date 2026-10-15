@@ -7,6 +7,19 @@ Le 15 octobre 2026, la somme des working sets des neuf processus Spotify ouverts
 pas une mesure de démarrage ni une consommation privée et exclusive. Les pages
 mémoire partagées peuvent être comptées plusieurs fois.
 
+## Relevé du prototype Windows
+
+Le 15 octobre 2026, après connexion puis redémarrage de Fastify, 15 échantillons
+espacés d'une seconde ont été relevés, avec tous les descendants WebView2.
+Le client affichait l'accueil réel, sans lecture. La médiane de mémoire privée
+était de **251,38 Mio**, sur sept processus ; le CPU moyen était arrondi à 0 %.
+
+Dans la session Spotify déjà ouverte, un relevé distinct de 15 échantillons donnait
+1 988,52 Mio de mémoire privée. Le parcours précédent, l'état de la fenêtre et la
+durée de session n'étaient pas identiques. Le prototype n'intégrait pas encore
+toutes les fonctions. Ces chiffres décrivent deux sessions existantes : ils ne
+permettent pas de calculer un gain à fonctionnalités équivalentes.
+
 ## Comparaison à réaliser
 
 Tester Spotify et Fastify release sur le même PC, compte et réseau, à tour de rôle.

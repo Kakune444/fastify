@@ -8,11 +8,12 @@ Projet indépendant, sans affiliation à Spotify ni au framework web Fastify.
 
 ## État
 
-Prototype en développement. La connexion native, les métadonnées et trois secondes
-de lecture ont été vérifiées avec une session locale. L'accueil et la recherche
-ont été rejoués avec succès via les services internes Spotify. Le client Tauri
-complet et sa connexion OAuth restent à vérifier. **La parité Spotify n'est pas
-atteinte et aucun gain de performance global n'est encore démontré.**
+Prototype en développement. L'application Windows a été compilée et testée avec
+un compte réel : connexion OAuth, reconnexion après redémarrage, accueil,
+recherche, bibliothèque paginée, albums et playlists, lecture Rust, pause et déplacement dans le morceau.
+Les autres parcours sont suivis dans [l'état des fonctions](docs/STATUS.md).
+**La parité Spotify n'est pas atteinte et aucun gain de performance global n'est
+encore démontré.**
 
 ## Développement
 

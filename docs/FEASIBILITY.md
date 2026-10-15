@@ -11,7 +11,7 @@ localement de ce qui est documenté et de ce qui reste à tester.
 - `spclient.wg.spotify.com/gabo-receiver-service/public/v3/events/` reçoit des
   événements et répond en HTTP 200. Il ne constitue pas une API de bibliothèque.
 - Les sessions `CONNECT` ne sont que des tunnels et ne décrivent pas les appels.
-- Aucun schéma Protobuf ni mécanisme de lecture autonome n'est encore validé.
+- Au premier relevé, les schémas Protobuf et la lecture autonome restaient à valider.
 - Un essai ponctuel de `/v1/me`, `/v1/me/playlists` et `/v1/search` avec la session
   capturée a reçu HTTP 429 (`API rate limit exceeded`). Aucun nouvel essai répété
   n'est lancé sur ces routes ; cette session ne valide donc pas l'API publique.
@@ -22,7 +22,7 @@ localement de ce qui est documenté et de ce qui reste à tester.
 avec `--play`, trois secondes de lecture. Il s'appuie sur
 [librespot 0.8.0](https://github.com/librespot-org/librespot/tree/v0.8.0), sous licence
 MIT. Ce candidat utilise un moteur audio Rust et les protocoles Spotify ; son
-fonctionnement avec ce compte reste à tester. Ce n'est pas une validation du
+fonctionnement avec ce compte a ensuite été vérifié. Ce n'est pas une validation du
 mode hors ligne, de la qualité sans perte ou d'une connexion durable.
 
 Le fichier de session est fourni uniquement en local. La CI compile sans compte,
@@ -71,8 +71,14 @@ de compte, titre écouté ni contenu de capture n'est publié.
 - Avec `--play`, il a reçu `PlayerEvent::Playing`, attendu trois secondes et arrêté
   le lecteur : `NATIVE_PLAYBACK_STARTED`, puis `PROBE_OK`. Le moteur audio est exécuté
   dans le programme Rust ; ce test n'a pas envoyé de commande au lecteur Spotify.
-- Les identifiants réutilisables, leur reconnexion et le flux OAuth du client complet
-  restent à tester. Une session capturée n'établit pas la pérennité de la connexion.
+- Le client Tauri release a été lancé sur Windows. L'utilisateur a terminé le flux
+  OAuth dans son navigateur ; l'accueil et la recherche ont chargé des données réelles.
+- Après fermeture et relancement sans fichier de capture, le compte s'est reconnecté
+  à partir du coffre Windows. La lecture, la pause et le déplacement ont été vérifiés
+  dans l'application. Le renouvellement après expiration réelle reste à éprouver.
+- `lookupChildEntities` fournit ici les visuels, sans nom de playlist. Les noms et
+  propriétaires sont présents dans les `meta_items` de la rootlist décorée. Le
+  diagnostic natif confirme 27 playlists nommées parmi les 40 premières entrées.
 
 Le test natif valide une première lecture autonome, pas la parité Spotify. Les
 paroles, le hors ligne, la qualité sans perte et la totalité des appareils Connect
