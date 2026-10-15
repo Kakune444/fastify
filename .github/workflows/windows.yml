@@ -31,6 +31,8 @@ jobs:
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
       - name: Compile Windows desktop client
         run: npm run tauri build -- --ci --no-bundle
+      - name: Verify native library pagination
+        run: cargo test --release --locked --lib --manifest-path src-tauri/Cargo.toml
       - uses: actions/upload-artifact@v4
         with:
           name: fastify-windows-prototype

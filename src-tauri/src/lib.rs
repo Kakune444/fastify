@@ -428,17 +428,15 @@ async fn search_catalog(state: State<'_, Arc<Backend>>, query: String) -> Result
 }
 
 #[tauri::command]
-async fn get_library(state: State<'_, Arc<Backend>>) -> Result<Value> {
+async fn get_library(state: State<'_, Arc<Backend>>, offset: Option<usize>) -> Result<Value> {
     let session = state.session().await?;
-    let path = format!(
-        "/playlist/v2/user/{}/rootlist?from=0&length=40",
-        session.username()
-    );
+    let offset = offset.unwrap_or(0);
+    if offset > 100_000 {
+        return Err(error("INPUT", "Page de bibliothèque invalide."));
+    }
     let bytes = tokio::time::timeout(
         Duration::from_secs(15),
-        session
-            .spclient()
-            .request(&reqwest::Method::GET, &path, None, None),
+        session.spclient().get_rootlist(offset, Some(40)),
     )
     .await
     .map_err(network_error)?
@@ -446,27 +444,66 @@ async fn get_library(state: State<'_, Arc<Backend>>) -> Result<Value> {
     let root =
         librespot_protocol::playlist4_external::SelectedListContent::parse_from_bytes(&bytes)
             .map_err(network_error)?;
-    let uris: Vec<_> = root
-        .contents
-        .as_ref()
+    let mut page = library_page(&root, offset);
+    let uris: Vec<_> = page["items"]
+        .as_array()
         .into_iter()
-        .flat_map(|c| c.items.iter())
-        .filter_map(|i| {
-            let uri = i.uri();
-            if uri.starts_with("spotify:playlist:") || uri.contains(":playlist:") {
-                Some(uri.to_owned())
-            } else {
-                None
-            }
-        })
-        .take(40)
+        .flatten()
+        .filter_map(|i| i["uri"].as_str())
         .collect();
-    if uris.is_empty() {
-        return Ok(json!({"data":{"lookupEntities":[]}}));
+    if !uris.is_empty() {
+        // This operation supplies artwork only; names come from decorated rootlist metadata.
+        if let Ok(lookup) = state
+            .query("lookupChildEntities", json!({"uris":uris}))
+            .await
+        {
+            if let (Some(items), Some(entities)) = (
+                page["items"].as_array_mut(),
+                lookup["data"]["lookupEntities"].as_array(),
+            ) {
+                for item in items {
+                    if let Some(entity) =
+                        entities.iter().find(|entity| entity["uri"] == item["uri"])
+                    {
+                        item["images"] = entity["visualIdentityTrait"]["squareCoverImage"]["image"]
+                            ["data"]
+                            .clone();
+                    }
+                }
+            }
+        }
     }
-    state
-        .query("lookupChildEntities", json!({"uris":uris}))
-        .await
+    Ok(page)
+}
+
+fn library_page(
+    root: &librespot_protocol::playlist4_external::SelectedListContent,
+    offset: usize,
+) -> Value {
+    let contents = root.contents.as_ref();
+    let items: Vec<Value> = contents
+        .into_iter()
+        .flat_map(|c| {
+            c.items.iter().enumerate().filter_map(|(index, item)| {
+                let SpotifyUri::Playlist { id, .. } = SpotifyUri::from_uri(item.uri()).ok()? else {
+                    return None;
+                };
+                let uri = SpotifyUri::Playlist { id, user: None }.to_uri().ok()?;
+                let meta = c.meta_items.get(index);
+                let name = meta
+                    .and_then(|m| m.attributes.as_ref())
+                    .map(|a| a.name())
+                    .filter(|n| !n.is_empty())
+                    .unwrap_or("Playlist");
+                let owner = meta.map(|m| m.owner_username()).unwrap_or("");
+                Some(json!({"uri":uri,"name":name,"ownerV2":{"data":{"name":owner}}}))
+            })
+        })
+        .collect();
+    let consumed = contents.map_or(0, |c| c.items.len());
+    let total = root.length().max(0) as usize;
+    let next = offset.saturating_add(consumed);
+    json!({"items":items,"total":total,"offset":offset,"nextOffset":if consumed > 0 && next < total {Some(next)} else {None}})
 }
 
 fn track_view(track: Track) -> TrackView {
@@ -637,4 +674,53 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("Fastify could not start");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use librespot_protocol::playlist4_external::{
+        Item, ListAttributes, ListItems, MetaItem, SelectedListContent,
+    };
+
+    #[test]
+    fn rootlist_keeps_names_aligned_when_folders_are_filtered() {
+        let mut root = SelectedListContent::new();
+        root.set_length(8);
+        let mut contents = ListItems::new();
+        contents.set_pos(0);
+        contents.set_truncated(true);
+        for (uri, name) in [
+            ("spotify:start-group:folder", "Dossier"),
+            (
+                "spotify:user:owner:playlist:37i9dQZF1DXcBWIGoYBM5M",
+                "Ma playlist",
+            ),
+        ] {
+            let mut item = Item::new();
+            item.set_uri(uri.into());
+            contents.items.push(item);
+            let mut meta = MetaItem::new();
+            let mut attributes = ListAttributes::new();
+            attributes.set_name(name.into());
+            meta.attributes = Some(attributes).into();
+            contents.meta_items.push(meta);
+        }
+        root.contents = Some(contents).into();
+        let page = library_page(&root, 0);
+        assert_eq!(page["items"].as_array().unwrap().len(), 1);
+        assert_eq!(page["items"][0]["name"], "Ma playlist");
+        assert_eq!(
+            page["items"][0]["uri"],
+            "spotify:playlist:37i9dQZF1DXcBWIGoYBM5M"
+        );
+        assert_eq!(page["nextOffset"], 2);
+    }
+
+    #[test]
+    fn empty_rootlist_does_not_repeat_the_same_page() {
+        let page = library_page(&SelectedListContent::new(), 40);
+        assert!(page["nextOffset"].is_null());
+        assert!(page["items"].as_array().unwrap().is_empty());
+    }
 }

@@ -48,6 +48,9 @@ let playback: Playback = {
   unavailable: false,
 };
 let library: Card[] = [];
+let libraryNext: number | null = null;
+let libraryFilter = "all";
+let libraryLoading = false;
 let queue: Card[] = [];
 let sections: Section[] = [];
 let cards = new Map<string, Card>();
@@ -150,9 +153,9 @@ function welcome(): void {
     `<div class="welcome"><div class="welcome-symbol">${icon("music")}</div><p class="eyebrow">VOTRE MUSIQUE</p><h1>Tout commence<br/>par un titre.</h1><p>Retrouvez vos albums, vos artistes et vos playlists.</p><button class="pill green" id="welcome-connect">Se connecter à Spotify</button></div>`;
 }
 
-function renderLibrary(filter = "all"): void {
+function renderLibrary(): void {
   const items = library.filter(
-    (card) => filter === "all" || card.kind === filter,
+    (card) => libraryFilter === "all" || card.kind === libraryFilter,
   );
   byId("library-list").innerHTML = items.length
     ? items
@@ -161,7 +164,12 @@ function renderLibrary(filter = "all"): void {
             `<button class="library-item" data-uri="${esc(card.uri)}">${cover(card)}<span><strong>${esc(card.name)}</strong><small>${esc(card.subtitle)}</small></span></button>`,
         )
         .join("")
-    : `<div class="library-empty"><strong>${status.connected ? "Aucun élément affiché" : "Votre bibliothèque vous attend"}</strong><p>${status.connected ? "Votre bibliothèque apparaîtra ici dès qu’elle sera disponible." : "Connectez-vous pour retrouver votre musique."}</p></div>`;
+    : `<div class="library-empty"><strong>${status.connected ? "Aucun élément affiché" : "Votre bibliothèque vous attend"}</strong><p>${status.connected ? "Aucun élément disponible pour ce filtre." : "Connectez-vous pour retrouver votre musique."}</p></div>`;
+  if (libraryNext !== null)
+    byId("library-list").insertAdjacentHTML(
+      "beforeend",
+      `<button class="pill" id="library-more" ${libraryLoading ? "disabled" : ""}>Afficher plus</button>`,
+    );
 }
 
 function remember(items: Card[]): void {
@@ -224,12 +232,30 @@ async function search(query: string): Promise<void> {
   }
 }
 
-async function loadLibrary(): Promise<void> {
+async function loadLibrary(offset = 0): Promise<void> {
+  if (libraryLoading) return;
+  libraryLoading = true;
   try {
-    library = collectCards(await invoke("get_library"), 40);
+    const result = await invoke<{
+      items: unknown[];
+      nextOffset: number | null;
+    }>("get_library", { offset });
+    const incoming = collectCards(result.items, 40);
+    library = [
+      ...new Map(
+        [...(offset ? library : []), ...incoming].map((card) => [
+          card.uri,
+          card,
+        ]),
+      ).values(),
+    ];
+    libraryNext = result.nextOffset;
     renderLibrary();
   } catch (err) {
     if ((err as AppError)?.code !== "AUTH_REQUIRED") showError(err);
+  } finally {
+    libraryLoading = false;
+    renderLibrary();
   }
 }
 
@@ -383,6 +409,7 @@ document.addEventListener("click", async (event) => {
       await invoke("disconnect_spotify");
       status = { connected: false, nativeReady: false, username: null };
       library = [];
+      libraryNext = null;
       queue = [];
       cards.clear();
       playback = {
@@ -421,8 +448,11 @@ document.addEventListener("click", async (event) => {
     document
       .querySelectorAll(".library-filters .chip")
       .forEach((item) => item.classList.toggle("active", item === button));
-    renderLibrary(button.dataset.library);
+    libraryFilter = button.dataset.library;
+    renderLibrary();
   }
+  if (id === "library-more" && libraryNext !== null)
+    void loadLibrary(libraryNext);
   if (id === "toggle-play") void command(playback.playing ? "pause" : "play");
   if (id === "previous") step(-1);
   if (id === "next") step(1);
