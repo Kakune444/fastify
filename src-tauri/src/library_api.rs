@@ -327,11 +327,11 @@ impl<'a> LibraryApi<'a> {
                 true,
             )
             .await;
-        if let Err(error) = response {
-            if !matches!(error, LibraryError::Uncertain) {
-                return Err(error);
-            }
-        }
+        let uncertain = match response {
+            Ok(_) => false,
+            Err(LibraryError::Uncertain) => true,
+            Err(error) => return Err(error),
+        };
         // Read back without resending a write, including after a lost HTTP response.
         let (check_offset, check_length) = match edit {
             PlaylistEdit::Add { uris } => (before.length().max(0) as usize, uris.len()),
@@ -362,6 +362,7 @@ impl<'a> LibraryApi<'a> {
             }
             PlaylistEdit::Move { uri, .. } => {
                 after.length() == before.length()
+                    && after.revision() != before.revision()
                     && after
                         .contents
                         .as_ref()
@@ -369,6 +370,16 @@ impl<'a> LibraryApi<'a> {
                         .is_some_and(|item| item.uri() == uri)
             }
         };
+        // A concurrent edit can remove a different item or leave an identical
+        // duplicate at the target. A lost reply cannot confirm that occurrence.
+        if uncertain
+            && matches!(
+                edit,
+                PlaylistEdit::Remove { .. } | PlaylistEdit::Move { .. }
+            )
+        {
+            return Err(LibraryError::Uncertain);
+        }
         if verified {
             Ok(())
         } else {

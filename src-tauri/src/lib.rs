@@ -179,7 +179,13 @@ impl Backend {
     async fn track_views(&self, session: &Session, uris: Vec<String>) -> Result<Vec<TrackView>> {
         let tracks: Vec<_> = stream::iter(uris)
             .map(|uri| async move {
-                let parsed = SpotifyUri::from_uri(&uri).map_err(network_error)?;
+                let Ok(parsed) = SpotifyUri::from_uri(&uri) else {
+                    return Ok::<_, AppError>(TrackView {
+                        uri,
+                        name: "Titre indisponible".into(),
+                        ..TrackView::default()
+                    });
+                };
                 let result = tokio::time::timeout(Duration::from_secs(15), async {
                     let _slot = self.metadata.acquire().await.map_err(network_error)?;
                     Track::get(session, &parsed).await.map_err(network_error)
