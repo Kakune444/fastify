@@ -1007,6 +1007,7 @@ dependencies = [
  "librespot-metadata",
  "librespot-oauth",
  "librespot-playback",
+ "librespot-protocol",
  "protobuf",
  "reqwest 0.12.28",
  "serde",

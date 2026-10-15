@@ -314,7 +314,7 @@ async fn connect_spotify(
         ));
     }
     if !imported_mode {
-        let reusable = Credentials { username: Some(session.username()), auth_data: session.auth_data(), auth_type: librespot_core::protocol::authentication::AuthenticationType::AUTHENTICATION_STORED_SPOTIFY_CREDENTIALS };
+        let reusable = Credentials { username: Some(session.username()), auth_data: session.auth_data(), auth_type: librespot_protocol::authentication::AuthenticationType::AUTHENTICATION_STORED_SPOTIFY_CREDENTIALS };
         let saved = serde_json::to_string(&reusable).map_err(network_error)?;
         if vault.set_password(&saved).is_err() {
             session.shutdown();
@@ -444,7 +444,7 @@ async fn get_library(state: State<'_, Arc<Backend>>) -> Result<Value> {
     .map_err(network_error)?
     .map_err(network_error)?;
     let root =
-        librespot_core::protocol::playlist4_external::SelectedListContent::parse_from_bytes(&bytes)
+        librespot_protocol::playlist4_external::SelectedListContent::parse_from_bytes(&bytes)
             .map_err(network_error)?;
     let uris: Vec<_> = root
         .contents
