@@ -1,0 +1,24 @@
+{
+  "name": "fastify-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
+    "check": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test src/lib/*.test.ts",
+    "build": "npm run check && vite build",
+    "preview": "vite preview --host 127.0.0.1 --port 1421 --strictPort",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "2.12.4"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.12.3",
+    "@types/node": "^22.0.0",
+    "prettier": "3.9.10",
+    "typescript": "7.0.2",
+    "vite": "8.3.4"
+  }
+}

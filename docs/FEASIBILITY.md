@@ -57,5 +57,23 @@ de compte, titre écouté ni contenu de capture n'est publié.
    Spotify ouvert ? Les métadonnées et commandes Connect seules ne suffisent pas.
 4. Quelles fonctions restent accessibles, notamment paroles et hors ligne ?
 
-À ce stade, la parité et l'autonomie audio ne sont pas établies. Ne pas contourner
-les protections de lecture ni présenter des commandes distantes comme un moteur audio.
+## Résultats du prototype, 15 octobre 2026
+
+- Une deuxième capture expose `POST https://api-partner.spotify.com/pathfinder/v2/query`.
+  L'accueil (`home`), les suggestions et les entités (`lookupChildEntities`) ont été
+  rejoués depuis un script indépendant : HTTP 200 avec données.
+- Le hash de `searchDesktop` a été relevé dans le paquet `xpui.spa` installé,
+  puis la recherche complète a été testée : HTTP 200. Les variables nécessaires
+  sont validées par le serveur ; il ne s'agit pas d'une route supposée.
+- L'accueil fonctionne aussi avec un identifiant de suivi `sp_t` vide. Les fichiers
+  de requêtes du dépôt contiennent seulement les noms et hashes publics des requêtes.
+- Le programme Rust Windows a renvoyé `SESSION_OK`, puis `METADATA_OK`.
+- Avec `--play`, il a reçu `PlayerEvent::Playing`, attendu trois secondes et arrêté
+  le lecteur : `NATIVE_PLAYBACK_STARTED`, puis `PROBE_OK`. Le moteur audio est exécuté
+  dans le programme Rust ; ce test n'a pas envoyé de commande au lecteur Spotify.
+- Les identifiants réutilisables, leur reconnexion et le flux OAuth du client complet
+  restent à tester. Une session capturée n'établit pas la pérennité de la connexion.
+
+Le test natif valide une première lecture autonome, pas la parité Spotify. Les
+paroles, le hors ligne, la qualité sans perte et la totalité des appareils Connect
+ne sont pas validés. Ne pas présenter de commandes distantes comme un moteur audio.

@@ -1,0 +1,29 @@
+{
+  "home": {
+    "operationName": "home",
+    "extensions": {
+      "persistedQuery": {
+        "version": 1,
+        "sha256Hash": "76243c78b0e20ecdbe41b794dec8cbe73f75e585b0a7201b8d2e84578412847a"
+      }
+    }
+  },
+  "lookupChildEntities": {
+    "operationName": "lookupChildEntities",
+    "extensions": {
+      "persistedQuery": {
+        "version": 1,
+        "sha256Hash": "91ce02e32b19123de231dc8de91fe4b9ab84eca087d4c015549308d77fbb6d10"
+      }
+    }
+  },
+  "searchDesktop": {
+    "operationName": "searchDesktop",
+    "extensions": {
+      "persistedQuery": {
+        "version": 1,
+        "sha256Hash": "1148393611bbc58e84e47aed35ecc731275df9f9eb660956962e352dd3631d89"
+      }
+    }
+  }
+}

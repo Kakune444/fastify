@@ -1,0 +1,33 @@
+[package]
+name = "fastify-desktop"
+version = "0.1.0"
+description = "Lightweight Spotify desktop client"
+edition = "2024"
+publish = false
+
+[lib]
+name = "fastify_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls"] }
+tokio = { version = "1", features = ["sync", "time", "rt-multi-thread"] }
+librespot-core = { version = "=0.8.0", default-features = false, features = ["native-tls"] }
+librespot-metadata = "=0.8.0"
+librespot-playback = { version = "=0.8.0", default-features = false, features = ["rodio-backend"] }
+librespot-oauth = { version = "=0.8.0", default-features = false, features = ["native-tls"] }
+keyring = { version = "3", features = ["windows-native"] }
+protobuf = "3.7"
+futures-util = "0.3"
+
+[profile.release]
+strip = true
+opt-level = "s"
+lto = "thin"
+codegen-units = 1

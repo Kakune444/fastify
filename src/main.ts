@@ -1,0 +1,509 @@
+import { invoke, isTauri } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import {
+  collectCards,
+  escapeHtml as esc,
+  formatTime,
+  homeSections,
+  imageUrl,
+  searchSections,
+  type Card,
+  type Section,
+} from "./lib/catalog.ts";
+import "./style.css";
+
+type Status = {
+  connected: boolean;
+  nativeReady: boolean;
+  username: string | null;
+};
+type NativeTrack = {
+  uri: string;
+  name: string;
+  artist: string;
+  album: string;
+  image: string;
+  durationMs: number;
+};
+type Playback = {
+  track: NativeTrack | null;
+  playing: boolean;
+  loading: boolean;
+  positionMs: number;
+  unavailable: boolean;
+};
+type Collection = {
+  name: string;
+  tracks: NativeTrack[];
+  total: number;
+  offset: number;
+};
+type AppError = { code?: string; message?: string; retryAfterSeconds?: number };
+let status: Status = { connected: false, nativeReady: false, username: null };
+let playback: Playback = {
+  track: null,
+  playing: false,
+  loading: false,
+  positionMs: 0,
+  unavailable: false,
+};
+let library: Card[] = [];
+let queue: Card[] = [];
+let sections: Section[] = [];
+let cards = new Map<string, Card>();
+let requestId = 0;
+let searchTimer: ReturnType<typeof setTimeout>;
+let toastTimer: ReturnType<typeof setTimeout>;
+let collectionUri = "";
+let collectionOffset = 0;
+let collectionTotal = 0;
+let lastPlaybackUpdate = performance.now();
+
+const paths: Record<string, string> = {
+  home: '<path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-6v-7h-4v7H4a1 1 0 0 1-1-1Z"/>',
+  search: '<circle cx="10.5" cy="10.5" r="7.5"/><path d="m16 16 5 5"/>',
+  library: '<path d="M4 3v18M9 3v18M14 4l5-1 3 17-5 1Z"/>',
+  play: '<path d="m8 4 13 8-13 8Z"/>',
+  pause: '<path d="M7 4h3v16H7zM14 4h3v16h-3z"/>',
+  previous: '<path d="M5 4v16m14-16L7 12l12 8Z"/>',
+  next: '<path d="M19 4v16M5 4l12 8-12 8Z"/>',
+  volume:
+    '<path d="M3 9h4l5-4v14l-5-4H3Zm13-2a7 7 0 0 1 0 10m3-13a11 11 0 0 1 0 16"/>',
+  queue: '<path d="M3 5h18M3 11h12M3 17h8m6-2 5 3-5 3Z"/>',
+  music:
+    '<path d="M9 18V5l11-2v13M9 8l11-2"/><ellipse cx="5.5" cy="18.5" rx="3.5" ry="2.5"/><ellipse cx="16.5" cy="16.5" rx="3.5" ry="2.5"/>',
+  heart:
+    '<path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1.1-1.1a5.5 5.5 0 0 0-7.8 7.8L12 21l8.8-8.6a5.5 5.5 0 0 0 0-7.8Z"/>',
+  shuffle:
+    '<path d="M3 6h3c5 0 7 12 12 12h3m-4-4 4 4-4 4M3 18h3c2 0 4-3 5-6m3-4c1-1 3-2 4-2h3m-4-4 4 4-4 4"/>',
+  repeat:
+    '<path d="m17 2 4 4-4 4M3 10V8a2 2 0 0 1 2-2h16M7 22l-4-4 4-4m14 0v2a2 2 0 0 1-2 2H3"/>',
+  clock: '<circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 2"/>',
+};
+const icon = (name: string, cls = "") =>
+  `<svg class="icon ${cls}" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${paths[name] ?? paths.music}</svg>`;
+const byId = <T extends HTMLElement = HTMLElement>(id: string): T =>
+  document.getElementById(id) as T;
+
+byId("app").innerHTML = `
+  <header class="topbar">
+    <a class="brand" href="#" aria-label="Fastify, accueil">${icon("music")}<strong>Fastify</strong></a>
+    <div class="top-center"><button class="round home-button" id="home" aria-label="Accueil">${icon("home")}</button>
+      <label class="search-box">${icon("search")}<input id="search" type="search" maxlength="200" placeholder="Que souhaitez-vous écouter ?" aria-label="Rechercher dans Spotify" autocomplete="off" spellcheck="false"/><span class="search-hint">Ctrl K</span></label>
+    </div>
+    <div id="account"><button class="pill white" id="connect">Se connecter</button></div>
+  </header>
+  <div class="workspace">
+    <aside class="library pane" aria-label="Bibliothèque">
+      <div class="library-heading">${icon("library")}<h2>Bibliothèque</h2></div>
+      <div class="chips library-filters"><button class="chip active" data-library="all">Tout</button><button class="chip" data-library="playlist">Playlists</button><button class="chip" data-library="album">Albums</button><button class="chip" data-library="artist">Artistes</button></div>
+      <div id="library-list" class="library-list"><div class="library-empty"><strong>Votre bibliothèque vous attend</strong><p>Connectez-vous pour retrouver votre musique.</p></div></div>
+    </aside>
+    <main class="content pane" id="content" tabindex="-1" aria-label="Contenu Spotify"><div id="main-content"></div></main>
+    <aside class="now-playing pane" aria-label="En cours de lecture"><h2>En cours de lecture</h2><div id="now-playing"><div class="now-empty">${icon("music")}<p>Choisissez un titre<br/>pour commencer à écouter.</p></div></div></aside>
+  </div>
+  <footer class="player" aria-label="Lecteur audio">
+    <div id="track-info" class="track-info"></div>
+    <div class="transport"><div class="transport-buttons">
+      <button class="icon-button muted" aria-label="Lecture aléatoire indisponible dans ce prototype" disabled>${icon("shuffle")}</button>
+      <button id="previous" class="icon-button" aria-label="Titre précédent" disabled>${icon("previous")}</button>
+      <button id="toggle-play" class="play-button" aria-label="Lire" disabled>${icon("play")}</button>
+      <button id="next" class="icon-button" aria-label="Titre suivant" disabled>${icon("next")}</button>
+      <button class="icon-button muted" aria-label="Répétition indisponible dans ce prototype" disabled>${icon("repeat")}</button>
+    </div><div class="timeline"><span id="position">0:00</span><input id="seek" type="range" min="0" max="100" value="0" aria-label="Position de lecture" disabled/><span id="duration">0:00</span></div></div>
+    <div class="player-options"><button id="show-queue" class="icon-button" aria-label="File d’attente">${icon("queue")}</button>${icon("volume")}<input id="volume" type="range" min="0" max="100" value="50" aria-label="Volume" disabled/></div>
+  </footer>
+  <div id="toast" role="status" aria-live="polite" hidden></div>`;
+
+function showError(value: unknown): void {
+  const err = value as AppError;
+  const message = err?.message || "Une erreur est survenue. Réessayez.";
+  const toast = byId("toast");
+  toast.textContent = `${message}${err.retryAfterSeconds ? ` (${err.retryAfterSeconds} s)` : ""}`;
+  toast.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => {
+    toast.hidden = true;
+  }, 6500);
+  if (err.code === "AUTH_REQUIRED") {
+    status.connected = false;
+    status.nativeReady = false;
+    renderAccount();
+  }
+}
+
+function cover(card: Pick<Card, "image" | "name" | "kind">, cls = ""): string {
+  const image = imageUrl(card.image);
+  return image
+    ? `<img class="cover ${cls} ${card.kind === "artist" ? "artist-cover" : ""}" src="${esc(image)}" alt="" loading="lazy" decoding="async"/>`
+    : `<span class="cover placeholder ${cls}">${icon("music")}</span>`;
+}
+
+function renderAccount(): void {
+  byId("account").innerHTML = status.connected
+    ? `<details class="profile"><summary title="Compte">${esc((status.username || "F")[0].toUpperCase())}</summary><button id="disconnect">Se déconnecter</button></details>`
+    : '<button class="pill white" id="connect">Se connecter</button>';
+}
+
+function welcome(): void {
+  byId("main-content").innerHTML =
+    `<div class="welcome"><div class="welcome-symbol">${icon("music")}</div><p class="eyebrow">VOTRE MUSIQUE</p><h1>Tout commence<br/>par un titre.</h1><p>Retrouvez vos albums, vos artistes et vos playlists.</p><button class="pill green" id="welcome-connect">Se connecter à Spotify</button></div>`;
+}
+
+function renderLibrary(filter = "all"): void {
+  const items = library.filter(
+    (card) => filter === "all" || card.kind === filter,
+  );
+  byId("library-list").innerHTML = items.length
+    ? items
+        .map(
+          (card) =>
+            `<button class="library-item" data-uri="${esc(card.uri)}">${cover(card)}<span><strong>${esc(card.name)}</strong><small>${esc(card.subtitle)}</small></span></button>`,
+        )
+        .join("")
+    : `<div class="library-empty"><strong>${status.connected ? "Aucun élément affiché" : "Votre bibliothèque vous attend"}</strong><p>${status.connected ? "Votre bibliothèque apparaîtra ici dès qu’elle sera disponible." : "Connectez-vous pour retrouver votre musique."}</p></div>`;
+}
+
+function remember(items: Card[]): void {
+  items.forEach((card) => cards.set(card.uri, card));
+}
+function cardGrid(items: Card[]): string {
+  remember(items);
+  return `<div class="card-grid">${items.map((card) => `<button class="music-card" data-uri="${esc(card.uri)}"><span class="artwork">${cover(card)}<span class="card-play">${icon("play")}</span></span><strong>${esc(card.name)}</strong><span>${esc(card.subtitle)}</span></button>`).join("")}</div>`;
+}
+function renderSections(items: Section[], title?: string): void {
+  cards.clear();
+  remember(library);
+  byId("main-content").innerHTML =
+    `${title ? `<h1 class="page-title">${esc(title)}</h1>` : '<div class="chips content-chips"><span class="chip active">Tout</span><span class="chip">Musique</span><span class="chip">Podcasts</span></div>'}${items.map((section) => `<section class="music-section"><h2>${esc(section.name)}</h2>${cardGrid(section.items)}</section>`).join("") || '<div class="empty"><h1>Aucun résultat</h1><p>Essayez une autre recherche.</p></div>'}`;
+}
+
+async function loadHome(): Promise<void> {
+  const id = ++requestId;
+  if (!status.connected) {
+    welcome();
+    return;
+  }
+  byId("main-content").innerHTML =
+    '<div class="loading" role="status">Chargement de votre musique…</div>';
+  try {
+    const result = await invoke("get_home", {
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    });
+    if (id !== requestId) return;
+    sections = homeSections(result);
+    renderSections(sections);
+  } catch (err) {
+    if (id === requestId) {
+      byId("main-content").innerHTML =
+        '<div class="empty"><h1>Impossible de charger l’accueil</h1><button class="pill white" id="retry-home">Réessayer</button></div>';
+      showError(err);
+    }
+  }
+}
+
+async function search(query: string): Promise<void> {
+  const id = ++requestId;
+  if (!status.connected) {
+    welcome();
+    return;
+  }
+  byId("main-content").innerHTML =
+    '<div class="loading" role="status">Recherche…</div>';
+  try {
+    const result = await invoke("search_catalog", { query });
+    if (id !== requestId) return;
+    const groups = searchSections(result);
+    renderSections(groups, `Résultats pour « ${query} »`);
+  } catch (err) {
+    if (id === requestId) {
+      byId("main-content").innerHTML =
+        '<div class="empty"><h1>Recherche indisponible</h1><p>Réessayez dans un instant.</p></div>';
+      showError(err);
+    }
+  }
+}
+
+async function loadLibrary(): Promise<void> {
+  try {
+    library = collectCards(await invoke("get_library"), 40);
+    renderLibrary();
+  } catch (err) {
+    if ((err as AppError)?.code !== "AUTH_REQUIRED") showError(err);
+  }
+}
+
+function nativeCard(track: NativeTrack): Card {
+  return {
+    uri: track.uri,
+    name: track.name,
+    subtitle: track.artist,
+    image: track.image,
+    kind: "track",
+    durationMs: track.durationMs,
+  };
+}
+async function openCollection(card: Card, offset = 0): Promise<void> {
+  const id = ++requestId;
+  byId("main-content").innerHTML =
+    '<div class="loading" role="status">Chargement des titres…</div>';
+  try {
+    const result = await invoke<Collection>("open_collection", {
+      uri: card.uri,
+      offset,
+    });
+    if (id !== requestId) return;
+    collectionUri = card.uri;
+    collectionOffset = result.offset;
+    collectionTotal = result.total;
+    queue = result.tracks.map(nativeCard);
+    remember(queue);
+    byId("main-content").innerHTML =
+      `<div class="collection-header">${cover(card)}<div><p>${esc(card.kind === "album" ? "Album" : "Playlist")}</p><h1>${esc(result.name)}</h1><p>${result.total} titres</p></div></div>
+      <div class="tracklist"><div class="tracklist-heading"><span>#</span><span>Titre</span><span>Album</span><span>${icon("clock")}</span></div>${result.tracks.map((track, index) => `<button class="track-row" data-play="${esc(track.uri)}"><span class="track-index">${offset + index + 1}</span><span class="row-name">${cover({ image: track.image, name: track.name, kind: "track" })}<span><strong>${esc(track.name)}</strong><small>${esc(track.artist)}</small></span></span><span class="album-name">${esc(track.album)}</span><span>${formatTime(track.durationMs)}</span></button>`).join("")}</div>
+      <div class="pagination"><button class="pill" id="collection-prev" ${offset === 0 ? "disabled" : ""}>Précédent</button><span>${offset + 1}–${Math.min(offset + 40, result.total)} sur ${result.total}</span><button class="pill" id="collection-next" ${offset + 40 >= result.total ? "disabled" : ""}>Suivant</button></div>`;
+    updateControls();
+  } catch (err) {
+    if (id === requestId) {
+      byId("main-content").innerHTML =
+        '<div class="empty"><h1>Cette page est indisponible</h1><p>Réessayez après vous être connecté.</p></div>';
+      showError(err);
+    }
+  }
+}
+
+async function play(uri: string): Promise<void> {
+  if (!status.nativeReady) {
+    showError({
+      message: "La lecture native nécessite une connexion Spotify valide.",
+    });
+    return;
+  }
+  try {
+    await invoke("play_track", { uri });
+  } catch (err) {
+    showError(err);
+  }
+}
+async function command(command: string, value?: number): Promise<void> {
+  try {
+    await invoke("player_command", { command, value });
+  } catch (err) {
+    showError(err);
+  }
+}
+function step(direction: number): void {
+  const index = queue.findIndex((track) => track.uri === playback.track?.uri);
+  if (direction < 0 && playback.positionMs > 3000) {
+    void command("seek", 0);
+    return;
+  }
+  const track = queue[index + direction];
+  if (track) void play(track.uri);
+}
+function updateControls(): void {
+  const hasTrack = !!playback.track && status.nativeReady;
+  const toggle = byId<HTMLButtonElement>("toggle-play");
+  toggle.disabled = !hasTrack || playback.loading;
+  toggle.innerHTML = icon(playback.playing ? "pause" : "play");
+  toggle.setAttribute("aria-label", playback.playing ? "Pause" : "Lire");
+  byId<HTMLInputElement>("seek").disabled = !hasTrack;
+  byId<HTMLInputElement>("volume").disabled = !status.nativeReady;
+  const index = queue.findIndex((track) => track.uri === playback.track?.uri);
+  byId<HTMLButtonElement>("previous").disabled = !hasTrack;
+  byId<HTMLButtonElement>("next").disabled =
+    !hasTrack || index < 0 || index >= queue.length - 1;
+}
+function renderPlayback(): void {
+  const track = playback.track;
+  byId("track-info").innerHTML = track
+    ? `${cover({ image: track.image, name: track.name, kind: "track" })}<span><strong>${esc(track.name)}</strong><small>${esc(track.artist)}</small></span>`
+    : "";
+  byId("now-playing").innerHTML = track
+    ? `${cover({ image: track.image, name: track.name, kind: "track" })}<h3>${esc(track.name)}</h3><p>${esc(track.artist)}</p><div class="album-caption"><small>Album</small><p>${esc(track.album)}</p></div>`
+    : '<div class="now-empty">' +
+      icon("music") +
+      "<p>Choisissez un titre<br/>pour commencer à écouter.</p></div>";
+  byId("duration").textContent = formatTime(track?.durationMs || 0);
+  updateControls();
+}
+async function connect(interactive: boolean): Promise<void> {
+  if (!isTauri()) {
+    if (interactive)
+      showError({
+        message: "Ouvrez l’application Windows Fastify pour vous connecter.",
+      });
+    return;
+  }
+  const button = document.querySelector<HTMLButtonElement>(
+    "#connect, #welcome-connect",
+  );
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Connexion…";
+  }
+  try {
+    status = await invoke<Status>("connect_spotify", { interactive });
+    renderAccount();
+    updateControls();
+    await loadHome();
+    if (status.nativeReady) void loadLibrary();
+  } catch (err) {
+    if (interactive || (err as AppError).code !== "AUTH_REQUIRED")
+      showError(err);
+  } finally {
+    renderAccount();
+  }
+}
+
+byId<HTMLInputElement>("search").addEventListener("input", (event) => {
+  clearTimeout(searchTimer);
+  ++requestId;
+  const query = (event.target as HTMLInputElement).value.trim();
+  searchTimer = setTimeout(() => {
+    if (query) void search(query);
+    else void loadHome();
+  }, 350);
+});
+document.addEventListener("click", async (event) => {
+  const button = (event.target as HTMLElement).closest<HTMLElement>(
+    "button, a.brand",
+  );
+  if (!button) return;
+  const id = button.id;
+  if (button.matches("a.brand") || id === "home" || id === "retry-home") {
+    event.preventDefault();
+    clearTimeout(searchTimer);
+    byId<HTMLInputElement>("search").value = "";
+    void loadHome();
+  }
+  if (id === "connect" || id === "welcome-connect") void connect(true);
+  if (id === "disconnect") {
+    try {
+      await invoke("disconnect_spotify");
+      status = { connected: false, nativeReady: false, username: null };
+      library = [];
+      queue = [];
+      cards.clear();
+      playback = {
+        track: null,
+        playing: false,
+        loading: false,
+        unavailable: false,
+        positionMs: 0,
+      };
+      renderAccount();
+      renderLibrary();
+      renderPlayback();
+      await loadHome();
+    } catch (err) {
+      showError(err);
+    }
+  }
+  if (button.dataset.uri) {
+    const card =
+      cards.get(button.dataset.uri) ||
+      library.find((item) => item.uri === button.dataset.uri);
+    if (card) {
+      if (card.kind === "track") {
+        queue = [...cards.values()].filter((item) => item.kind === "track");
+        void play(card.uri);
+      } else if (card.kind === "album" || card.kind === "playlist")
+        void openCollection(card);
+      else
+        showError({
+          message: "Cette page n’est pas encore disponible dans ce prototype.",
+        });
+    }
+  }
+  if (button.dataset.play) void play(button.dataset.play);
+  if (button.dataset.library) {
+    document
+      .querySelectorAll(".library-filters .chip")
+      .forEach((item) => item.classList.toggle("active", item === button));
+    renderLibrary(button.dataset.library);
+  }
+  if (id === "toggle-play") void command(playback.playing ? "pause" : "play");
+  if (id === "previous") step(-1);
+  if (id === "next") step(1);
+  if (id === "collection-next" || id === "collection-prev") {
+    const card =
+      cards.get(collectionUri) || library.find((c) => c.uri === collectionUri);
+    if (card && collectionTotal > 0)
+      void openCollection(
+        card,
+        Math.max(0, collectionOffset + (id === "collection-next" ? 40 : -40)),
+      );
+  }
+  if (id === "show-queue") {
+    ++requestId;
+    renderSections(
+      [{ name: "File d’attente", items: queue }],
+      "File d’attente",
+    );
+  }
+});
+byId<HTMLInputElement>("seek").addEventListener("change", (event) => {
+  void command(
+    "seek",
+    Math.round(
+      (Number((event.target as HTMLInputElement).value) / 100) *
+        (playback.track?.durationMs || 0),
+    ),
+  );
+});
+byId<HTMLInputElement>("volume").addEventListener("change", (event) => {
+  void command("volume", Number((event.target as HTMLInputElement).value));
+});
+document.addEventListener("keydown", (event) => {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+    event.preventDefault();
+    byId<HTMLInputElement>("search").focus();
+  }
+  if (
+    event.code === "Space" &&
+    !(event.target instanceof HTMLInputElement) &&
+    playback.track
+  ) {
+    event.preventDefault();
+    void command(playback.playing ? "pause" : "play");
+  }
+});
+
+function updatePosition(): void {
+  const position = Math.min(
+    playback.track?.durationMs || 0,
+    playback.positionMs +
+      (playback.playing ? performance.now() - lastPlaybackUpdate : 0),
+  );
+  byId("position").textContent = formatTime(position);
+  const seek = byId<HTMLInputElement>("seek");
+  if (document.activeElement !== seek)
+    seek.value = String(
+      playback.track?.durationMs
+        ? (position / playback.track.durationMs) * 100
+        : 0,
+    );
+}
+setInterval(() => {
+  if (!document.hidden) updatePosition();
+}, 500);
+
+async function boot(): Promise<void> {
+  welcome();
+  renderLibrary();
+  if (!isTauri()) return;
+  await listen<Playback>("playback", (event) => {
+    const previous = playback.track?.uri;
+    playback = event.payload;
+    lastPlaybackUpdate = performance.now();
+    if (previous !== playback.track?.uri) renderPlayback();
+    else updateControls();
+    updatePosition();
+    if (playback.unavailable)
+      showError({ message: "Ce titre ne peut pas être lu actuellement." });
+  });
+  await listen("track-ended", () => step(1));
+  await connect(false);
+}
+void boot().catch(showError);
