@@ -28,6 +28,10 @@ mode hors ligne, de la qualité sans perte ou d'une connexion durable.
 Le fichier de session est fourni uniquement en local. La CI compile sans compte,
 sans captures et sans secrets Spotify. Elle ne teste pas la lecture effective.
 
+Premier build : incompatibilité de traits entre `vergen-gitcl 1.0.8` et
+`vergen 9.1.0`, dépendances de construction de librespot. Le verrouillage conserve
+`vergen 9.0.6`, compatible avec la génération de métadonnées utilisée par librespot.
+
 Ces chemins ont été lus dans Fiddler. Aucun en-tête d'authentification, identifiant
 de compte, titre écouté ni contenu de capture n'est publié.
 
