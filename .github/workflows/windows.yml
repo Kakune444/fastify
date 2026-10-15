@@ -1,0 +1,28 @@
+name: Windows verification
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tools/spotify-probe
+      - name: Compile native Spotify probe (no credentials)
+        run: cargo build --release --locked --manifest-path tools/spotify-probe/Cargo.toml
+      - uses: actions/upload-artifact@v4
+        with:
+          name: spotify-probe-windows
+          path: tools/spotify-probe/target/release/spotify-probe.exe
+          retention-days: 7

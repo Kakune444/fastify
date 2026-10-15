@@ -12,6 +12,21 @@ localement de ce qui est documenté et de ce qui reste à tester.
   événements et répond en HTTP 200. Il ne constitue pas une API de bibliothèque.
 - Les sessions `CONNECT` ne sont que des tunnels et ne décrivent pas les appels.
 - Aucun schéma Protobuf ni mécanisme de lecture autonome n'est encore validé.
+- Un essai ponctuel de `/v1/me`, `/v1/me/playlists` et `/v1/search` avec la session
+  capturée a reçu HTTP 429 (`API rate limit exceeded`). Aucun nouvel essai répété
+  n'est lancé sur ces routes ; cette session ne valide donc pas l'API publique.
+
+## Prototype natif
+
+`tools/spotify-probe` teste séparément la connexion native, les métadonnées et,
+avec `--play`, trois secondes de lecture. Il s'appuie sur
+[librespot 0.8.0](https://github.com/librespot-org/librespot/tree/v0.8.0), sous licence
+MIT. Ce candidat utilise un moteur audio Rust et les protocoles Spotify ; son
+fonctionnement avec ce compte reste à tester. Ce n'est pas une validation du
+mode hors ligne, de la qualité sans perte ou d'une connexion durable.
+
+Le fichier de session est fourni uniquement en local. La CI compile sans compte,
+sans captures et sans secrets Spotify. Elle ne teste pas la lecture effective.
 
 Ces chemins ont été lus dans Fiddler. Aucun en-tête d'authentification, identifiant
 de compte, titre écouté ni contenu de capture n'est publié.
