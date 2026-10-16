@@ -593,6 +593,110 @@ h2 {
   width: 18px;
   height: 18px;
 }
+.mode-button {
+  position: relative;
+}
+.mode-button.active {
+  color: #1ed760;
+}
+.mode-button.active::after {
+  content: "";
+  position: absolute;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
+  bottom: -7px;
+  left: calc(50% - 2px);
+}
+.repeat-one {
+  position: absolute;
+  font-size: 9px;
+  font-weight: 800;
+  background: #000;
+  left: 8px;
+  top: 5px;
+  line-height: 11px;
+  min-width: 7px;
+  text-align: center;
+}
+.queue-page {
+  padding: 30px 24px;
+}
+.queue-page h1 {
+  font-size: 25px;
+  margin-bottom: 28px;
+}
+.queue-page h2 {
+  font-size: 16px;
+  margin: 24px 0 16px;
+  color: #b3b3b3;
+}
+.queue-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 28px 45px 28px;
+  gap: 14px;
+  align-items: center;
+  padding: 9px 12px;
+  border-radius: 4px;
+  color: #aaa;
+  font-size: 13px;
+}
+.queue-row:hover {
+  background: #ffffff10;
+}
+.queue-row[draggable="true"] {
+  cursor: grab;
+}
+.queue-row.dragging {
+  opacity: 0.45;
+}
+.queue-row.drop-target {
+  box-shadow: inset 0 -2px #1ed760;
+}
+.queue-row:focus-visible {
+  outline: 2px solid white;
+}
+.queue-play {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  text-align: left;
+  min-width: 0;
+}
+.queue-play .cover {
+  width: 40px;
+  height: 40px;
+  flex: none;
+}
+.queue-play > span {
+  min-width: 0;
+}
+.queue-play strong,
+.queue-play small {
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.queue-play strong {
+  color: #fff;
+  font-size: 14px;
+  font-weight: 500;
+}
+.queue-play small {
+  color: #aaa;
+  font-size: 12px;
+  margin-top: 4px;
+}
+.queue-empty {
+  color: #aaa;
+  font-size: 14px;
+  margin: 20px 0;
+}
+#queue-more {
+  margin-top: 20px;
+}
 .play-button {
   width: 32px;
   height: 32px;
@@ -737,10 +841,9 @@ input[type="range"]:disabled {
 .tracklist-heading,
 .track-row {
   display: grid;
-  grid-template-columns: 24px minmax(140px, 1.6fr) minmax(
-      70px,
-      1fr
-    ) 28px 45px 28px;
+  grid-template-columns:
+    24px minmax(140px, 1.6fr) minmax(70px, 1fr)
+    28px 45px 28px;
   gap: 14px;
   align-items: center;
   width: 100%;

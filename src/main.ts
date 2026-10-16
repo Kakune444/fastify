@@ -13,6 +13,9 @@ import {
 import "./style.css";
 import { SavedTracks } from "./lib/saved.ts";
 import { PlaylistDialogs } from "./ui/playlists.ts";
+import { PlaybackQueue, type QueueEntry } from "./lib/queue.ts";
+import { readContext, type ContextPage } from "./lib/context.ts";
+import { QueueView } from "./ui/queue.ts";
 
 type Status = {
   connected: boolean;
@@ -28,11 +31,13 @@ type NativeTrack = {
   durationMs: number;
 };
 type Playback = {
+  selection: string;
   track: NativeTrack | null;
   playing: boolean;
   loading: boolean;
   positionMs: number;
   unavailable: boolean;
+  ended: boolean;
 };
 type Collection = {
   name: string;
@@ -47,17 +52,24 @@ type Collection = {
 type AppError = { code?: string; message?: string; retryAfterSeconds?: number };
 let status: Status = { connected: false, nativeReady: false, username: null };
 let playback: Playback = {
+  selection: "",
   track: null,
   playing: false,
   loading: false,
   positionMs: 0,
+  ended: false,
   unavailable: false,
 };
 let library: Card[] = [];
 let libraryNext: number | null = null;
 let libraryFilter = "all";
 let libraryLoading = false;
-let queue: Card[] = [];
+const queue = new PlaybackQueue<Card>();
+let playSelection = "";
+let lastEndedSelection = "";
+let contextRequest = 0;
+let queuePreparing = false;
+let queueDragId: number | null = null;
 let collectionTracks: Card[] = [];
 let sections: Section[] = [];
 let cards = new Map<string, Card>();
@@ -70,6 +82,17 @@ let collectionTotal = 0;
 let lastPlaybackUpdate = performance.now();
 const savedTracks = new SavedTracks();
 let activeView = "home";
+const queueView = new QueueView(queue, {
+  active: () => activeView === "queue",
+  cover,
+  save: savedButton,
+  menu: menuButton,
+  rendered: (uris) => {
+    updateSavedButtons();
+    void refreshSaved(uris);
+  },
+  error: showError,
+});
 let likedTokens = [""];
 let likedIndex = 0;
 let likedOffsets = [0];
@@ -163,11 +186,11 @@ byId("app").innerHTML = `
   <footer class="player" aria-label="Lecteur audio">
     <div id="track-info" class="track-info"></div>
     <div class="transport"><div class="transport-buttons">
-      <button class="icon-button muted" aria-label="Lecture aléatoire indisponible dans ce prototype" disabled>${icon("shuffle")}</button>
+      <button id="shuffle" class="icon-button mode-button" aria-label="Activer la lecture aléatoire" aria-pressed="false" disabled>${icon("shuffle")}</button>
       <button id="previous" class="icon-button" aria-label="Titre précédent" disabled>${icon("previous")}</button>
       <button id="toggle-play" class="play-button" aria-label="Lire" disabled>${icon("play")}</button>
       <button id="next" class="icon-button" aria-label="Titre suivant" disabled>${icon("next")}</button>
-      <button class="icon-button muted" aria-label="Répétition indisponible dans ce prototype" disabled>${icon("repeat")}</button>
+      <button id="repeat" class="icon-button mode-button" aria-label="Activer la répétition" aria-pressed="false" disabled>${icon("repeat")}</button>
     </div><div class="timeline"><span id="position">0:00</span><input id="seek" type="range" min="0" max="100" value="0" aria-label="Position de lecture" disabled/><span id="duration">0:00</span></div></div>
     <div class="player-options"><button id="show-queue" class="icon-button" aria-label="File d’attente">${icon("queue")}</button>${icon("volume")}<input id="volume" type="range" min="0" max="100" value="50" aria-label="Volume" disabled/></div>
   </footer>
@@ -421,9 +444,9 @@ function nativeCard(track: NativeTrack): Card {
   };
 }
 
-function menuButton(uri: string, position?: number): string {
+function menuButton(uri: string, position?: number, queueId?: number): string {
   if (!uri.startsWith("spotify:track:")) return "<span></span>";
-  return `<button class="icon-button track-menu-button" data-menu="${esc(uri)}" ${position === undefined ? "" : `data-position="${position}"`} aria-label="Plus d’options" ${!status.nativeReady || playlistPending ? "disabled" : ""}>${icon("more")}</button>`;
+  return `<button class="icon-button track-menu-button" data-menu="${esc(uri)}" ${position === undefined ? "" : `data-position="${position}"`} ${queueId === undefined ? "" : `data-queue-id="${queueId}"`} aria-label="Plus d’options" ${!status.nativeReady || playlistPending ? "disabled" : ""}>${icon("more")}</button>`;
 }
 function closeTrackMenu(): void {
   document.querySelector(".track-menu")?.remove();
@@ -436,10 +459,14 @@ function openTrackMenu(button: HTMLElement): void {
       ? null
       : Number(button.dataset.position);
   const snapshot = activeView === "collection" ? selectedCollection : null;
+  const queueId =
+    button.dataset.queueId === undefined
+      ? null
+      : Number(button.dataset.queueId);
   const menu = document.createElement("div");
   menu.className = "track-menu";
   menu.setAttribute("role", "menu");
-  menu.innerHTML = `<button role="menuitem" data-action="add">Ajouter à une playlist</button>${snapshot?.data.canEditItems && position !== null ? '<button role="menuitem" data-action="remove">Supprimer de cette playlist</button>' : ""}`;
+  menu.innerHTML = `<button role="menuitem" data-action="queue">Ajouter à la file d’attente</button><button role="menuitem" data-action="add">Ajouter à une playlist</button>${queueId !== null ? '<button role="menuitem" data-action="unqueue">Retirer de la file d’attente</button>' : ""}${snapshot?.data.canEditItems && position !== null ? '<button role="menuitem" data-action="remove">Supprimer de cette playlist</button>' : ""}`;
   document.body.append(menu);
   const rect = button.getBoundingClientRect();
   menu.style.left = `${Math.max(8, Math.min(rect.right - menu.offsetWidth, window.innerWidth - menu.offsetWidth - 8))}px`;
@@ -452,6 +479,20 @@ function openTrackMenu(button: HTMLElement): void {
     if (!action) return;
     closeTrackMenu();
     if (action === "add") void playlists.add(uri);
+    if (action === "queue") {
+      queue.enqueue(
+        cards.get(uri) ??
+          queue.upcoming.find((entry) => entry.track.uri === uri)?.track ??
+          (playback.track?.uri === uri
+            ? nativeCard(playback.track)
+            : pendingCard(uri)),
+      );
+      queueChanged();
+    }
+    if (action === "unqueue" && queueId !== null) {
+      queue.remove(queueId);
+      queueChanged();
+    }
     if (action === "remove" && snapshot?.data.revision && position !== null)
       void playlists.change(snapshot.card.uri, snapshot.data.revision, {
         kind: "remove",
@@ -504,7 +545,7 @@ function trackList(
   return `<div class="tracklist"><div class="tracklist-heading"><span>#</span><span>Titre</span><span>Album</span><span></span><span>${icon("clock")}</span><span></span></div>${tracks
     .map((track, index) => {
       const position = offset + index;
-      return `<div class="track-row" ${editable ? `draggable="true" tabindex="0" data-position="${position}" data-track="${esc(track.uri)}" title="Glissez pour déplacer · Alt + ↑ ou ↓"` : ""}><button class="row-play" data-play="${esc(track.uri)}"><span class="track-index">${position + 1}</span><span class="row-name">${cover({ image: track.image, name: track.name, kind: "track" })}<span><strong>${esc(track.name)}</strong><small>${esc(track.artist)}</small></span></span></button><span class="album-name">${esc(track.album)}</span>${savedButton(track.uri)}<span>${formatTime(track.durationMs)}</span>${menuButton(track.uri, editable ? position : undefined)}</div>`;
+      return `<div class="track-row" ${editable ? `draggable="true" tabindex="0" data-position="${position}" data-track="${esc(track.uri)}" title="Glissez pour déplacer · Alt + ↑ ou ↓"` : ""}><button class="row-play" data-play="${esc(track.uri)}" data-play-position="${position}"><span class="track-index">${position + 1}</span><span class="row-name">${cover({ image: track.image, name: track.name, kind: "track" })}<span><strong>${esc(track.name)}</strong><small>${esc(track.artist)}</small></span></span></button><span class="album-name">${esc(track.album)}</span>${savedButton(track.uri)}<span>${formatTime(track.durationMs)}</span>${menuButton(track.uri, editable ? position : undefined)}</div>`;
     })
     .join("")}</div>`;
 }
@@ -586,47 +627,211 @@ async function openCollection(card: Card, offset = 0): Promise<void> {
   }
 }
 
-async function play(uri: string): Promise<void> {
+function pendingCard(uri: string): Card {
+  return {
+    uri,
+    name: "Chargement du titre…",
+    subtitle: "",
+    image: "",
+    kind: "track",
+    durationMs: 0,
+  };
+}
+function queueChanged(): void {
+  updateControls();
+  queueView.render();
+}
+async function startTrack(uri: string, position?: number): Promise<void> {
+  if (!status.nativeReady) return;
+  const generation = ++contextRequest;
+  const collection = activeView === "collection" ? selectedCollection : null;
+  const source =
+    collection?.card.uri ?? (activeView === "liked" ? likedCard.uri : null);
+  const known = new Map(
+    [...cards.values(), ...collectionTracks]
+      .filter((card) => card.kind === "track")
+      .map((card) => [card.uri, card]),
+  );
+  queuePreparing = true;
+  updateControls();
+  try {
+    let tracks: Card[];
+    let selected: number;
+    if (source) {
+      const all = await readContext(
+        (cursor, revision) =>
+          invoke<ContextPage>("get_context_page", {
+            uri: source,
+            cursor,
+            revision,
+          }),
+        () => generation !== contextRequest || !status.nativeReady,
+        collection?.data.revision ?? null,
+      );
+      if (!all) return;
+      const playable = all
+        .map((uri, index) => ({ uri, index }))
+        .filter((item) => /^spotify:track:[A-Za-z0-9]{22}$/.test(item.uri));
+      selected = playable.findIndex(
+        (item) => item.uri === uri && (!collection || item.index === position),
+      );
+      tracks = playable.map(
+        (item) => known.get(item.uri) ?? pendingCard(item.uri),
+      );
+    } else {
+      tracks = [...cards.values()].filter((card) => card.kind === "track");
+      selected = tracks.findIndex((card) => card.uri === uri);
+    }
+    if (generation !== contextRequest) return;
+    if (selected < 0)
+      throw {
+        code: "CONFLICT",
+        message: "La sélection a changé. Rechargez-la avant de la lire.",
+      };
+    const entry = queue.reset(
+      tracks,
+      selected,
+      collection?.data.name ?? (source ? "Titres likés" : "Votre sélection"),
+    );
+    queueView.reset();
+    await playEntry(entry);
+  } catch (error) {
+    if (generation === contextRequest) showError(error);
+  } finally {
+    if (generation === contextRequest) {
+      queuePreparing = false;
+      queueChanged();
+    }
+  }
+}
+async function playEntry(entry: QueueEntry<Card>): Promise<void> {
   if (!status.nativeReady) {
     showError({
       message: "La lecture native nécessite une connexion Spotify valide.",
     });
     return;
   }
+  const previousSelection = playSelection;
+  const selection = crypto.randomUUID();
+  playSelection = selection;
+  playback = {
+    selection,
+    track: {
+      uri: entry.track.uri,
+      name: entry.track.name,
+      artist: entry.track.subtitle,
+      image: entry.track.image,
+      album: "",
+      durationMs: entry.track.durationMs,
+    },
+    playing: false,
+    loading: true,
+    positionMs: 0,
+    unavailable: false,
+    ended: false,
+  };
+  lastPlaybackUpdate = performance.now();
+  renderPlayback();
+  queueChanged();
   try {
-    await invoke("play_track", { uri });
+    await invoke("play_track", { uri: entry.track.uri, selection });
   } catch (err) {
+    if (playSelection !== selection) return;
+    playback.loading = false;
+    playback.unavailable = true;
+    // Pause a prior selection that may still be audible after metadata failure.
+    void invoke("player_command", {
+      command: "pause",
+      selection: previousSelection,
+      value: null,
+    }).catch(() => {});
+    updateControls();
     showError(err);
   }
 }
 async function command(command: string, value?: number): Promise<void> {
   try {
-    await invoke("player_command", { command, value });
+    await invoke("player_command", {
+      command,
+      value,
+      selection: playSelection,
+    });
   } catch (err) {
     showError(err);
   }
 }
-function step(direction: number): void {
-  const index = queue.findIndex((track) => track.uri === playback.track?.uri);
+function step(direction: number, automatic = false): void {
+  if (queuePreparing || !status.nativeReady || (playback.loading && !automatic))
+    return;
   if (direction < 0 && playback.positionMs > 3000) {
     void command("seek", 0);
     return;
   }
-  const track = queue[index + direction];
-  if (track) void play(track.uri);
+  const entry = direction < 0 ? queue.previous() : queue.next(automatic);
+  if (entry) void playEntry(entry);
+  else if (direction < 0 && queue.current) void command("seek", 0);
+  queueChanged();
+}
+function togglePlayback(): void {
+  if (queuePreparing || playback.loading) return;
+  if (!queue.current) {
+    step(1);
+    return;
+  }
+  if (playback.ended || playback.unavailable) {
+    void playEntry(queue.current);
+    return;
+  }
+  void command(playback.playing ? "pause" : "play");
 }
 function updateControls(): void {
   const hasTrack = !!playback.track && status.nativeReady;
   const toggle = byId<HTMLButtonElement>("toggle-play");
-  toggle.disabled = !hasTrack || playback.loading;
+  toggle.disabled =
+    !status.nativeReady ||
+    queuePreparing ||
+    playback.loading ||
+    (!hasTrack && !queue.hasNext);
   toggle.innerHTML = icon(playback.playing ? "pause" : "play");
   toggle.setAttribute("aria-label", playback.playing ? "Pause" : "Lire");
-  byId<HTMLInputElement>("seek").disabled = !hasTrack;
+  byId<HTMLInputElement>("seek").disabled = !hasTrack || playback.loading;
   byId<HTMLInputElement>("volume").disabled = !status.nativeReady;
-  const index = queue.findIndex((track) => track.uri === playback.track?.uri);
-  byId<HTMLButtonElement>("previous").disabled = !hasTrack;
+  byId<HTMLButtonElement>("previous").disabled =
+    !hasTrack || playback.loading || queuePreparing;
   byId<HTMLButtonElement>("next").disabled =
-    !hasTrack || index < 0 || index >= queue.length - 1;
+    !status.nativeReady || playback.loading || queuePreparing || !queue.hasNext;
+  const shuffle = byId<HTMLButtonElement>("shuffle");
+  shuffle.disabled = !status.nativeReady || queuePreparing;
+  shuffle.setAttribute("aria-pressed", String(queue.shuffle));
+  shuffle.classList.toggle("active", queue.shuffle);
+  shuffle.setAttribute(
+    "aria-label",
+    queue.shuffle
+      ? "Désactiver la lecture aléatoire"
+      : "Activer la lecture aléatoire",
+  );
+  const repeat = byId<HTMLButtonElement>("repeat");
+  repeat.disabled = !status.nativeReady || queuePreparing;
+  repeat.setAttribute("aria-pressed", String(queue.repeat !== "off"));
+  repeat.classList.toggle("active", queue.repeat !== "off");
+  repeat.setAttribute(
+    "aria-label",
+    queue.repeat === "off"
+      ? "Activer la répétition"
+      : queue.repeat === "all"
+        ? "Répéter le titre"
+        : "Désactiver la répétition",
+  );
+  repeat.title =
+    queue.repeat === "off"
+      ? "Répétition désactivée"
+      : queue.repeat === "all"
+        ? "Répéter la sélection"
+        : "Répéter le titre";
+  if (repeat.dataset.mode !== queue.repeat) {
+    repeat.dataset.mode = queue.repeat;
+    repeat.innerHTML = `${icon("repeat")}${queue.repeat === "one" ? '<span class="repeat-one">1</span>' : ""}`;
+  }
 }
 function renderPlayback(): void {
   const track = playback.track;
@@ -720,6 +925,8 @@ document.addEventListener("click", async (event) => {
   }
   if (id === "connect" || id === "welcome-connect") void connect(true);
   if (id === "disconnect") {
+    ++contextRequest;
+    playSelection = "";
     playlists.close();
     selectedCollection = null;
     savedTracks.clear();
@@ -728,15 +935,18 @@ document.addEventListener("click", async (event) => {
       status = { connected: false, nativeReady: false, username: null };
       library = [];
       libraryNext = null;
-      queue = [];
+      queue.clear();
+      queueView.reset();
       collectionTracks = [];
       cards.clear();
       playback = {
+        selection: "",
         track: null,
         playing: false,
         loading: false,
         unavailable: false,
         positionMs: 0,
+        ended: false,
       };
       renderAccount();
       renderLibrary();
@@ -763,8 +973,7 @@ document.addEventListener("click", async (event) => {
       library.find((item) => item.uri === button.dataset.uri);
     if (card) {
       if (card.kind === "track") {
-        queue = [...cards.values()].filter((item) => item.kind === "track");
-        void play(card.uri);
+        void startTrack(card.uri);
       } else if (card.kind === "album" || card.kind === "playlist")
         void openCollection(card);
       else
@@ -774,9 +983,14 @@ document.addEventListener("click", async (event) => {
     }
   }
   if (button.dataset.play) {
-    queue = [...collectionTracks];
-    void play(button.dataset.play);
+    void startTrack(button.dataset.play, Number(button.dataset.playPosition));
   }
+  if (button.dataset.queuePlay && !queuePreparing && !playback.loading) {
+    const entry = queue.jump(Number(button.dataset.queuePlay));
+    if (entry) void playEntry(entry);
+  }
+  if (button.dataset.queueCurrent) togglePlayback();
+  if (id === "queue-more") queueView.more();
   if (button.dataset.library) {
     document
       .querySelectorAll(".library-filters .chip")
@@ -786,7 +1000,15 @@ document.addEventListener("click", async (event) => {
   }
   if (id === "library-more" && libraryNext !== null)
     void loadLibrary(libraryNext);
-  if (id === "toggle-play") void command(playback.playing ? "pause" : "play");
+  if (id === "toggle-play") togglePlayback();
+  if (id === "shuffle") {
+    queue.setShuffle(!queue.shuffle);
+    queueChanged();
+  }
+  if (id === "repeat") {
+    queue.cycleRepeat();
+    queueChanged();
+  }
   if (id === "previous") step(-1);
   if (id === "next") step(1);
   if (id === "collection-next" || id === "collection-prev") {
@@ -801,10 +1023,7 @@ document.addEventListener("click", async (event) => {
   if (id === "show-queue") {
     ++requestId;
     activeView = "queue";
-    renderSections(
-      [{ name: "File d’attente", items: queue }],
-      "File d’attente",
-    );
+    queueView.render();
   }
 });
 byId<HTMLInputElement>("seek").addEventListener("change", (event) => {
@@ -824,6 +1043,15 @@ document.addEventListener("keydown", (event) => {
   if (target.closest("dialog, input, textarea, [contenteditable='true']"))
     return;
   if (event.altKey && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
+    const queued = target.closest<HTMLElement>(".queue-row[data-queue-id]");
+    if (queued) {
+      event.preventDefault();
+      const id = Number(queued.dataset.queueId);
+      const position = queue.upcoming.findIndex((entry) => entry.id === id);
+      queue.move(id, position + (event.key === "ArrowUp" ? -1 : 1));
+      queueChanged();
+      return;
+    }
     const row = target.closest<HTMLElement>(".track-row[data-position]");
     if (row) {
       event.preventDefault();
@@ -846,10 +1074,21 @@ document.addEventListener("keydown", (event) => {
     playback.track
   ) {
     event.preventDefault();
-    void command(playback.playing ? "pause" : "play");
+    togglePlayback();
   }
 });
 document.addEventListener("dragstart", (event) => {
+  const queued = (event.target as HTMLElement).closest<HTMLElement>(
+    ".queue-row[data-queue-id]",
+  );
+  if (queued) {
+    queueDragId = Number(queued.dataset.queueId);
+    event.dataTransfer?.setData("text/plain", `queue:${queueDragId}`);
+    if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+    queued.classList.add("dragging");
+    closeTrackMenu();
+    return;
+  }
   const row = (event.target as HTMLElement).closest<HTMLElement>(
     ".track-row[draggable='true']",
   );
@@ -869,6 +1108,16 @@ document.addEventListener("dragstart", (event) => {
   closeTrackMenu();
 });
 document.addEventListener("dragover", (event) => {
+  const queued = (event.target as HTMLElement).closest<HTMLElement>(
+    ".queue-row[data-queue-id]",
+  );
+  if (queued && queueDragId !== null) {
+    event.preventDefault();
+    document.querySelector(".drop-target")?.classList.remove("drop-target");
+    queued.classList.add("drop-target");
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+    return;
+  }
   const row = (event.target as HTMLElement).closest<HTMLElement>(
     ".track-row[draggable='true']",
   );
@@ -884,6 +1133,21 @@ document.addEventListener("dragover", (event) => {
   }
 });
 document.addEventListener("drop", (event) => {
+  const queued = (event.target as HTMLElement).closest<HTMLElement>(
+    ".queue-row[data-queue-id]",
+  );
+  if (queued && queueDragId !== null) {
+    event.preventDefault();
+    queue.move(
+      queueDragId,
+      queue.upcoming.findIndex(
+        (entry) => entry.id === Number(queued.dataset.queueId),
+      ),
+    );
+    queueDragId = null;
+    queueChanged();
+    return;
+  }
   const row = (event.target as HTMLElement).closest<HTMLElement>(
     ".track-row[draggable='true']",
   );
@@ -903,6 +1167,7 @@ document.addEventListener("drop", (event) => {
     .forEach((element) => element.classList.remove("dragging", "drop-target"));
 });
 document.addEventListener("dragend", () => {
+  queueDragId = null;
   drag = null;
   document
     .querySelectorAll(".dragging, .drop-target")
@@ -935,16 +1200,37 @@ async function boot(): Promise<void> {
   renderLibrary();
   if (!isTauri()) return;
   await listen<Playback>("playback", (event) => {
-    const previous = playback.track?.uri;
+    if (event.payload.selection !== playSelection) return;
+    const previous = playback.track;
     playback = event.payload;
     lastPlaybackUpdate = performance.now();
-    if (previous !== playback.track?.uri) renderPlayback();
-    else updateControls();
+    if (
+      previous?.uri !== playback.track?.uri ||
+      previous?.name !== playback.track?.name ||
+      previous?.album !== playback.track?.album ||
+      previous?.image !== playback.track?.image ||
+      previous?.artist !== playback.track?.artist ||
+      previous?.durationMs !== playback.track?.durationMs
+    ) {
+      if (playback.track)
+        queue.updateTrack(playback.track.uri, nativeCard(playback.track));
+      renderPlayback();
+      queueView.render();
+    } else updateControls();
     updatePosition();
     if (playback.unavailable)
       showError({ message: "Ce titre ne peut pas être lu actuellement." });
   });
-  await listen("track-ended", () => step(1));
+  await listen<string>("track-ended", (event) => {
+    if (
+      event.payload !== playSelection ||
+      event.payload === lastEndedSelection ||
+      queuePreparing
+    )
+      return;
+    lastEndedSelection = event.payload;
+    step(1, true);
+  });
   await connect(false);
 }
 void boot().catch(showError);

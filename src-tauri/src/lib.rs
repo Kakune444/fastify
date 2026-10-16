@@ -24,8 +24,10 @@ use std::{
 use tauri::{Emitter, Manager, State};
 use tokio::sync::{Mutex, Semaphore};
 mod library_api;
+mod playback_loads;
 use library_api::{LibraryApi, LibraryError};
 use library_api::{PlaylistEdit, playlist_permissions, revision_hex};
+use playback_loads::PlaybackLoads;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -91,6 +93,7 @@ struct Native {
     session: Session,
     player: Arc<Player>,
     mixer: SoftMixer,
+    loads: Arc<Mutex<PlaybackLoads>>,
 }
 struct Backend {
     client: reqwest::Client,
@@ -119,11 +122,13 @@ struct TrackView {
 #[derive(Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Playback {
+    selection: String,
     track: Option<TrackView>,
     playing: bool,
     loading: bool,
     position_ms: u32,
     unavailable: bool,
+    ended: bool,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -156,6 +161,14 @@ struct CollectionTrack {
 struct LikedPage {
     tracks: Vec<TrackView>,
     next_token: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ContextPage {
+    uris: Vec<String>,
+    next: Option<String>,
+    revision: Option<String>,
 }
 
 impl Backend {
@@ -449,15 +462,26 @@ async fn connect_spotify(
         move || backend(None, AudioFormat::default()),
     );
     let mut events = player.get_player_event_channel();
+    let loads = Arc::new(Mutex::new(PlaybackLoads::default()));
     *state.native.lock().await = Some(Native {
         session,
         player,
         mixer,
+        loads: loads.clone(),
     });
     let shared = state.inner().clone();
     tauri::async_runtime::spawn(async move {
         while let Some(event) = events.recv().await {
+            if let PlayerEvent::PlayRequestIdChanged { play_request_id } = &event {
+                loads.lock().await.changed(*play_request_id);
+                continue;
+            }
             let mut snapshot = shared.playback.lock().await;
+            if let Some(id) = event.get_play_request_id() {
+                if !loads.lock().await.accepts(id, &snapshot.selection) {
+                    continue;
+                }
+            }
             let event_track = match &event {
                 PlayerEvent::Playing { track_id, .. }
                 | PlayerEvent::Paused { track_id, .. }
@@ -476,6 +500,7 @@ async fn connect_spotify(
             }) {
                 continue;
             }
+            let ended = matches!(&event, PlayerEvent::EndOfTrack { .. });
             match event {
                 PlayerEvent::Playing { position_ms, .. } => {
                     snapshot.playing = true;
@@ -497,7 +522,10 @@ async fn connect_spotify(
                 }
                 PlayerEvent::EndOfTrack { .. } => {
                     snapshot.playing = false;
-                    let _ = app.emit("track-ended", ());
+                    snapshot.loading = false;
+                    snapshot.ended = true;
+                    snapshot.position_ms =
+                        snapshot.track.as_ref().map_or(0, |track| track.duration_ms);
                 }
                 PlayerEvent::Stopped { .. } => {
                     snapshot.playing = false;
@@ -506,6 +534,11 @@ async fn connect_spotify(
                 _ => continue,
             }
             let _ = app.emit("playback", &*snapshot);
+            if ended {
+                let selection = snapshot.selection.clone();
+                drop(snapshot);
+                let _ = app.emit("track-ended", selection);
+            }
         }
     });
     get_status(state.clone()).await
@@ -877,11 +910,123 @@ async fn open_collection(
 }
 
 #[tauri::command]
+async fn get_context_page(
+    state: State<'_, Arc<Backend>>,
+    uri: String,
+    cursor: Option<String>,
+    revision: Option<String>,
+) -> Result<ContextPage> {
+    let _slot = state.requests.acquire().await.map_err(network_error)?;
+    state.check_library_cooldown().await?;
+    let session = state.session().await?;
+    let cursor = cursor.unwrap_or_default();
+    if uri == "spotify:collection:tracks" {
+        let (uris, next) = state
+            .library_result(
+                LibraryApi::new(&session, &state.client)
+                    .liked_uris_page(&cursor, 1000)
+                    .await,
+            )
+            .await?;
+        return Ok(ContextPage {
+            uris,
+            next,
+            revision: None,
+        });
+    }
+    let offset = if cursor.is_empty() {
+        0
+    } else {
+        cursor
+            .parse::<usize>()
+            .map_err(|_| error("INPUT", "Page de lecture invalide."))?
+    };
+    if offset > 100_000 {
+        return Err(error("INPUT", "Page de lecture invalide."));
+    }
+    let id = SpotifyUri::from_uri(&uri).map_err(|_| error("INPUT", "Lien Spotify invalide."))?;
+    let (uris, total, current_revision) = match id {
+        SpotifyUri::Playlist { .. } => {
+            let page = state
+                .library_result(
+                    LibraryApi::new(&session, &state.client)
+                        .playlist_page(&uri, offset, 1000)
+                        .await,
+                )
+                .await?;
+            let current = revision_hex(page.revision());
+            if revision
+                .as_ref()
+                .is_some_and(|expected| *expected != current)
+            {
+                return Err(LibraryError::Conflict.into());
+            }
+            let uris: Vec<_> = page
+                .contents
+                .as_ref()
+                .into_iter()
+                .flat_map(|contents| contents.items.iter().map(|item| item.uri().to_owned()))
+                .collect();
+            (uris, page.length().max(0) as usize, Some(current))
+        }
+        SpotifyUri::Album { .. } => {
+            let _metadata = state.metadata.acquire().await.map_err(network_error)?;
+            let album = tokio::time::timeout(Duration::from_secs(15), Album::get(&session, &id))
+                .await
+                .map_err(network_error)?
+                .map_err(network_error)?;
+            let all: Vec<_> = album.tracks().filter_map(|id| id.to_uri().ok()).collect();
+            let total = all.len();
+            (
+                all.into_iter().skip(offset).take(1000).collect(),
+                total,
+                None,
+            )
+        }
+        _ => {
+            return Err(error(
+                "INPUT",
+                "Ce contexte de lecture n’est pas disponible.",
+            ));
+        }
+    };
+    let consumed = uris.len();
+    if consumed == 0 && offset < total {
+        return Err(LibraryError::Protocol.into());
+    }
+    let next = (consumed > 0 && offset + consumed < total).then(|| (offset + consumed).to_string());
+    Ok(ContextPage {
+        uris,
+        next,
+        revision: current_revision,
+    })
+}
+
+#[tauri::command]
+async fn get_track_details(
+    state: State<'_, Arc<Backend>>,
+    uris: Vec<String>,
+) -> Result<Vec<TrackView>> {
+    if uris.is_empty()
+        || uris.len() > 40
+        || uris.iter().any(|uri| library_api::track_uri(uri).is_err())
+    {
+        return Err(error("INPUT", "La liste de titres n’est pas valide."));
+    }
+    let session = state.session().await?;
+    state.track_views(&session, uris).await
+}
+
+#[tauri::command]
 async fn play_track(
     app: tauri::AppHandle,
     state: State<'_, Arc<Backend>>,
     uri: String,
+    selection: String,
 ) -> Result<()> {
+    if selection.is_empty() || selection.len() > 80 {
+        return Err(error("INPUT", "Sélection de lecture invalide."));
+    }
     let id = SpotifyUri::from_uri(&uri).map_err(|_| error("INPUT", "Lien Spotify invalide."))?;
     if !matches!(id, SpotifyUri::Track { .. }) {
         return Err(error(
@@ -890,7 +1035,7 @@ async fn play_track(
         ));
     }
     let session = state.session().await?;
-    let selection = state.selection.fetch_add(1, Ordering::SeqCst) + 1;
+    let generation = state.selection.fetch_add(1, Ordering::SeqCst) + 1;
     let track = tokio::time::timeout(Duration::from_secs(15), async {
         let _slot = state.metadata.acquire().await.map_err(network_error)?;
         Track::get(&session, &id).await.map_err(network_error)
@@ -898,19 +1043,21 @@ async fn play_track(
     .await
     .map_err(network_error)??;
     let native = state.native.lock().await;
-    if state.selection.load(Ordering::SeqCst) != selection {
+    if state.selection.load(Ordering::SeqCst) != generation {
         return Ok(());
     }
     let native = native
         .as_ref()
         .ok_or_else(|| error("AUTH_REQUIRED", "Reconnectez-vous à Spotify."))?;
     let snapshot = Playback {
+        selection: selection.clone(),
         track: Some(track_view(track)),
         loading: true,
         ..Playback::default()
     };
     *state.playback.lock().await = snapshot.clone();
     let _ = app.emit("playback", snapshot);
+    native.loads.lock().await.push(selection);
     native.player.load(id, true, 0);
     Ok(())
 }
@@ -920,11 +1067,19 @@ async fn player_command(
     state: State<'_, Arc<Backend>>,
     command: String,
     value: Option<u32>,
+    selection: Option<String>,
 ) -> Result<()> {
     let native = state.native.lock().await;
     let native = native
         .as_ref()
         .ok_or_else(|| error("AUTH_REQUIRED", "Connectez-vous à Spotify."))?;
+    if command != "volume" {
+        if let Some(selection) = &selection {
+            if *selection != state.playback.lock().await.selection {
+                return Ok(());
+            }
+        }
+    }
     match command.as_str() {
         "play" => native.player.play(),
         "pause" => native.player.pause(),
@@ -964,6 +1119,8 @@ pub fn run() {
             edit_playlist,
             create_playlist,
             open_collection,
+            get_context_page,
+            get_track_details,
             play_track,
             player_command
         ])

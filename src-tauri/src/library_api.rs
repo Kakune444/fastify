@@ -226,14 +226,22 @@ impl<'a> LibraryApi<'a> {
     }
 
     pub async fn liked_page(&self, token: &str) -> Result<(Vec<String>, Option<String>)> {
-        if token.len() > 4096 {
+        self.liked_uris_page(token, PAGE_SIZE).await
+    }
+
+    pub async fn liked_uris_page(
+        &self,
+        token: &str,
+        limit: i32,
+    ) -> Result<(Vec<String>, Option<String>)> {
+        if token.len() > 4096 || !(1..=1000).contains(&limit) {
             return Err(LibraryError::Input);
         }
         let mut request = PageRequest::new();
         request.username = self.session.username();
         request.set = "collection".into();
         request.pagination_token = token.into();
-        request.limit = PAGE_SIZE;
+        request.limit = limit;
         // The collection contains tombstones and other entity types. Skip empty
         // track pages, while bounding the work and preserving the server cursor.
         for page_index in 0..10 {

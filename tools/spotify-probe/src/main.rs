@@ -111,6 +111,24 @@ async fn diagnose_favorites(session: &Session) -> Result<(), Box<dyn std::error:
         .build()?;
     let api = library_api::LibraryApi::new(session, &client);
     let (uris, next) = api.liked_page("").await.map_err(|e| format!("{e:?}"))?;
+    let (bulk, _) = api
+        .liked_uris_page("", 1000)
+        .await
+        .map_err(|e| format!("{e:?}"))?;
+    if !bulk.is_empty()
+        && api
+            .contains(&bulk.iter().take(3).cloned().collect::<Vec<_>>())
+            .await
+            .map_err(|e| format!("{e:?}"))?
+            .iter()
+            .any(|saved| !saved)
+    {
+        return Err("Context items are not saved tracks".into());
+    }
+    println!(
+        "LIKED_CONTEXT_OK: tracks={} identifiers_only=true",
+        bulk.len()
+    );
     println!(
         "LIKED_PAGE_OK: tracks={} has_next={}",
         uris.len(),
