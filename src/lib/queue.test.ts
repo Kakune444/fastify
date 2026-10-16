@@ -46,6 +46,8 @@ test("repeat one responds to natural end while manual next advances", () => {
   assert.equal(queue.next(true)?.id, selected.id);
   assert.equal(queue.upcoming.length, 1);
   assert.equal(queue.next(false)?.track.uri, "b");
+  assert.equal(queue.hasNext, true);
+  assert.equal(queue.next(false)?.track.uri, "a");
 });
 
 test("repeat all starts a fresh context cycle and supports a single-track context", () => {

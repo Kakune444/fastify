@@ -35,7 +35,7 @@ export class PlaybackQueue<T extends { uri: string }> {
   get hasNext(): boolean {
     return (
       this.items.length > 0 ||
-      (this.repeat === "all" && this.context.length > 0)
+      (this.repeat !== "off" && this.context.length > 0)
     );
   }
 
@@ -130,7 +130,7 @@ export class PlaybackQueue<T extends { uri: string }> {
       this.ended = false;
       return this.current;
     }
-    if (!this.items.length && this.repeat === "all" && this.context.length) {
+    if (!this.items.length && this.repeat !== "off" && this.context.length) {
       this.visited.clear();
       this.skipped.clear();
       this.items = this.context.map((track, index) => this.entry(track, index));

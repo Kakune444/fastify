@@ -643,6 +643,12 @@ function queueChanged(): void {
 }
 async function startTrack(uri: string, position?: number): Promise<void> {
   if (!status.nativeReady) return;
+  if (!/^spotify:track:[A-Za-z0-9]{22}$/.test(uri)) {
+    showError({
+      message: "Ce type de contenu ne peut pas encore être lu dans Fastify.",
+    });
+    return;
+  }
   const generation = ++contextRequest;
   const collection = activeView === "collection" ? selectedCollection : null;
   const source =
@@ -764,7 +770,8 @@ function step(direction: number, automatic = false): void {
   if (queuePreparing || !status.nativeReady || (playback.loading && !automatic))
     return;
   if (direction < 0 && playback.positionMs > 3000) {
-    void command("seek", 0);
+    if (playback.ended && queue.current) void playEntry(queue.current);
+    else void command("seek", 0);
     return;
   }
   const entry = direction < 0 ? queue.previous() : queue.next(automatic);
@@ -793,6 +800,7 @@ function updateControls(): void {
     playback.loading ||
     (!hasTrack && !queue.hasNext);
   toggle.innerHTML = icon(playback.playing ? "pause" : "play");
+  toggle.classList.toggle("loading", queuePreparing || playback.loading);
   toggle.setAttribute("aria-label", playback.playing ? "Pause" : "Lire");
   byId<HTMLInputElement>("seek").disabled = !hasTrack || playback.loading;
   byId<HTMLInputElement>("volume").disabled = !status.nativeReady;
@@ -936,6 +944,7 @@ document.addEventListener("click", async (event) => {
       library = [];
       libraryNext = null;
       queue.clear();
+      queuePreparing = false;
       queueView.reset();
       collectionTracks = [];
       cards.clear();

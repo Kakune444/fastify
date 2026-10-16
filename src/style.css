@@ -715,6 +715,22 @@ h2 {
   transform: scale(1.07);
   color: #000;
 }
+.play-button.loading {
+  position: relative;
+}
+.play-button.loading .icon {
+  opacity: 0;
+}
+.play-button.loading::after {
+  content: "";
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  border: 2px solid #888;
+  border-top-color: #000;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
 .timeline {
   display: flex;
   align-items: center;
