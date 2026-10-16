@@ -1,21 +1,13 @@
 //! Account-scoped Connect state. Only the public view crosses IPC; transfer data stays here.
-use futures_util::StreamExt;
 use librespot_connect::{
     ConnectConfig, LoadContextOptions, LoadRequest, LoadRequestOptions, Options, PlayingTrack,
     Spirc,
 };
 use librespot_core::{
-    SpotifyUri, authentication::Credentials, config::DeviceType,
-    dealer::protocol::Message as DealerMessage, session::Session,
+    SpotifyUri, authentication::Credentials, config::DeviceType, session::Session,
 };
-use librespot_playback::{
-    mixer::Mixer,
-    player::{Player, PlayerEvent},
-};
-use librespot_protocol::{
-    connect::{Cluster, ClusterUpdate},
-    player::ProvidedTrack,
-};
+use librespot_playback::{mixer::Mixer, player::Player};
+use librespot_protocol::{connect::Cluster, player::ProvidedTrack};
 use protobuf::Message;
 use reqwest::{Client, Method};
 use serde::{Deserialize, Serialize};
@@ -390,17 +382,10 @@ impl ConnectRuntime {
         mixer: Arc<dyn Mixer>,
         client: Client,
     ) -> Result<Self> {
-        let mut clusters = session
-            .dealer()
-            .listen_for(
-                "hm://connect-state/v1/cluster",
-                DealerMessage::from_raw::<ClusterUpdate>,
-            )
-            .map_err(|_| ConnectError::Network)?;
-        let mut events = player.get_player_event_channel();
+        let (cluster_sender, mut clusters) = watch::channel(Cluster::new());
         let (spirc, task) = tokio::time::timeout(
             Duration::from_secs(40),
-            Spirc::new(
+            Spirc::new_with_state(
                 ConnectConfig {
                     name: "Spotisloth".into(),
                     device_type: DeviceType::Computer,
@@ -410,13 +395,14 @@ impl ConnectRuntime {
                 credentials,
                 player,
                 mixer,
+                Some(cluster_sender),
             ),
         )
         .await
         .map_err(|_| ConnectError::Network)?
         .map_err(|_| ConnectError::Network)?;
         let mut initial = ConnectModel::new(session.device_id().into());
-        initial.ready = true;
+        initial.ready = false;
         let model = Arc::new(Mutex::new(initial));
         let (sender, _) = watch::channel(model.lock().await.view());
         let shared = model.clone();
@@ -426,18 +412,11 @@ impl ConnectRuntime {
             let mut heartbeat = tokio::time::interval(Duration::from_secs(5));
             loop {
                 tokio::select! {
-                    update = clusters.next() => {
-                        let Some(Ok(mut update)) = update else { break; };
-                        if let Some(cluster) = update.cluster.take() {
-                            let mut m = shared.lock().await;
-                            if m.apply(cluster) { updates.send_replace(m.view()); }
-                        }
-                    }
-                    event = events.recv() => {
-                        let Some(event) = event else { break; };
-                        if matches!(event, PlayerEvent::SessionConnected { .. }) {
-                            let mut m = shared.lock().await; m.ready = true; updates.send_replace(m.view());
-                        }
+                    update = clusters.changed() => {
+                        if update.is_err() {break;}
+                        let cluster=clusters.borrow_and_update().clone();
+                        let mut m=shared.lock().await;
+                        if m.apply(cluster) {updates.send_replace(m.view());}
                     }
                     _ = heartbeat.tick() => if observed_session.is_invalid() { break; }
                 }

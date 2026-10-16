@@ -1303,7 +1303,8 @@ async function boot(): Promise<void> {
   renderLibrary();
   if (!isTauri()) return;
   await listen<ConnectState>("connect-state", (event) => {
-    if (event.payload.available) applyConnect(event.payload);
+    if (status.nativeReady && event.payload.available)
+      applyConnect(event.payload);
   });
   await connect(false);
 }

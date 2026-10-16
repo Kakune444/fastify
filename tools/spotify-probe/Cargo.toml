@@ -12,7 +12,7 @@ librespot-core = { version = "=0.8.0", default-features = false, features = ["na
 librespot-metadata = "=0.8.0"
 librespot-protocol = "=0.8.0"
 librespot-playback = { version = "=0.8.0", default-features = false, features = ["rodio-backend"] }
-librespot-connect = { version = "=0.8.0", default-features = false, features = ["native-tls"] }
+librespot-connect = { version = "=0.8.0", path = "../../vendor/librespot-connect", default-features = false, features = ["native-tls"] }
 protobuf-json-mapping = "3.7"
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }

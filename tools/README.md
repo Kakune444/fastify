@@ -28,6 +28,19 @@ Le mode historique accepte aussi un fichier JSON local avec `accessToken` et un
 puis arrête le lecteur. Un jeton capturé peut expirer ; ce mode n'établit pas la
 validité de la connexion normale. Ne jamais publier ce fichier.
 
+## Spotify Connect
+
+Avec Spotify ouvert sur un autre appareil du même compte, ce diagnostic enregistre
+un récepteur temporaire et attend les mises à jour de la liste des appareils :
+
+```powershell
+./tools/spotify-probe/target/release/spotify-probe.exe --stored --connect
+```
+
+Il ne lance aucun morceau et ne transfère pas la lecture. Il affiche seulement
+des compteurs (`CONNECT_DEVICES_OK`) ; il ferme sa session à la fin. Les transferts
+et commandes du lecteur doivent aussi être vérifiés dans l’exécutable Tauri.
+
 ## Ressources
 
 Voir le [protocole de mesure](../docs/PERFORMANCE.md) pour `Measure-Client.ps1`.
