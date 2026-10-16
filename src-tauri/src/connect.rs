@@ -543,12 +543,25 @@ impl ConnectRuntime {
                     return Ok(());
                 }
                 drop(m);
-                return self
-                    .send(
-                        &format!("/connect-state/v1/connect/transfer/from/{target}/to/{device_id}"),
-                        None,
-                    )
-                    .await;
+                self.send(
+                    &format!("/connect-state/v1/connect/transfer/from/{local}/to/{device_id}"),
+                    Some(json!({"transfer_options":{}})),
+                )
+                .await?;
+                let mut updates = self.subscribe();
+                return tokio::time::timeout(Duration::from_secs(12), async {
+                    loop {
+                        if self.view().await.active_device_id == device_id {
+                            return Ok(());
+                        }
+                        updates
+                            .changed()
+                            .await
+                            .map_err(|_| ConnectError::Uncertain)?;
+                    }
+                })
+                .await
+                .map_err(|_| ConnectError::Uncertain)?;
             }
             ConnectAction::Play {
                 uri,

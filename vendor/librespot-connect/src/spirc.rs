@@ -1824,8 +1824,10 @@ impl SpircTask {
 
         let response = self.connect_state.send_state(&self.session).await?;
         if let Some(updates) = &self.cluster_updates {
-            if let Ok(cluster) = Cluster::parse_from_bytes(&response) {
-                updates.send_replace(cluster);
+            if !response.is_empty() {
+                if let Ok(cluster) = Cluster::parse_from_bytes(&response) {
+                    updates.send_replace(cluster);
+                }
             }
         }
         Ok(())
