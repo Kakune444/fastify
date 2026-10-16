@@ -747,6 +747,8 @@ function applyConnect(next: ConnectState): void {
     previous.revision !== next.revision || previous.track?.uri !== track?.uri;
   const metadataChanged =
     playback.track?.name !== track?.name ||
+    playback.track?.artist !== track?.artist ||
+    playback.track?.durationMs !== track?.durationMs ||
     playback.track?.image !== track?.image ||
     playback.track?.album !== track?.album;
   playback = {
@@ -786,6 +788,7 @@ function applyConnect(next: ConnectState): void {
   }
   queue.shuffle = next.shuffle;
   queue.repeat = next.repeat;
+  if (metadataChanged && track) queue.updateTrack(track.uri, nativeCard(track));
   if (changed || metadataChanged) {
     renderPlayback();
     queueView.render();
@@ -933,8 +936,10 @@ async function connect(interactive: boolean): Promise<void> {
   try {
     status = await invoke<Status>("connect_spotify", { interactive });
     renderAccount();
-    if (!connectState.available)
-      applyConnect(await invoke<ConnectState>("get_connect_state"));
+    if (!connectState.available) {
+      const initial = await invoke<ConnectState>("get_connect_state");
+      if (!connectState.available) applyConnect(initial);
+    }
     updateControls();
     await loadHome();
     if (status.nativeReady) void loadLibrary();

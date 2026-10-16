@@ -33,7 +33,7 @@ use crate::{
 };
 use futures_util::StreamExt;
 use librespot_protocol::context_page::ContextPage;
-use protobuf::MessageField;
+use protobuf::{Message as _, MessageField};
 use std::{
     future::Future,
     sync::Arc,
