@@ -20,7 +20,9 @@ dans l'exécutable avant d'être déclarée opérationnelle.
 | Favoris                                | Ajout puis retrait confirmés par relecture sur un compte réel ; état initial restauré                                                                                          |
 | Édition des playlists                  | Création privée, nom/description, ajout, retrait d’un doublon, déplacement et conflit vérifiés par le moteur ; formulaires, menu et recherche du sélecteur vérifiés dans Tauri |
 | Artistes, podcasts, livres audio       | Recherche partielle, pages et lecture à compléter                                                                                                                              |
-| Aléatoire, répétition et file Connect  | À implémenter ; contrôles indisponibles signalés                                                                                                                               |
+| Aléatoire et répétition                | Aléatoire et titre suivant vérifiés dans Tauri ; répétition du titre à sa fin et retour au début de la playlist vérifiés                                                       |
+| File locale                            | Ajout prioritaire, doublon distinct, métadonnées différées, enchaînement après fin et glisser-déposer Windows vérifiés                                                         |
+| File et appareils Connect              | Synchronisation avec les autres appareils à implémenter                                                                                                                        |
 | Paroles, hors ligne, médias Windows    | À étudier et implémenter                                                                                                                                                       |
 | Comparaison de ressources équivalentes | Non effectuée ; relevé préliminaire documenté                                                                                                                                  |
 | Installateur et distribution publique  | En attente d'une version utilisable                                                                                                                                            |
@@ -39,7 +41,8 @@ ignore les réponses devenues obsolètes ; l'annulation réseau complète est à
 
 La bibliothèque affiche actuellement les playlists avec le nom technique de leur propriétaire ; les dossiers, albums et artistes
 suivis ne sont pas encore intégrés. La lecture de collection charge 40 titres par
-page. La file locale n'enchaîne pas encore automatiquement les pages suivantes.
+page. La nouvelle file prépare les liens du contexte complet lors d’une sélection
+explicite ; elle ne dépend plus des seuls titres de la page affichée.
 Le renouvellement après expiration réelle et la récupération d'une session révoquée
 restent à éprouver ; la reconnexion après redémarrage ne suffit pas à les valider.
 
@@ -70,15 +73,52 @@ ouvre un sélecteur ne contenant que des playlists modifiables. Sa recherche a
 été testée. Les mutations complètes sont vérifiées par la sonde qui partage le
 même service Rust ; tous les clics d’écriture n’ont pas été rejoués dans l’interface.
 
+## File et modes du lecteur
+
+La préparation lit les liens des titres par lots de 1 000, avec contrôle de révision
+pour les playlists. Les métadonnées restent chargées au besoin, avec quatre lectures
+concurrentes au maximum. La file affiche 40 éléments avant de proposer la suite.
+Une sélection abandonnée arrête la pagination après la requête déjà en cours.
+La limite de préparation est de 100 pages et 100 000 liens ; une réponse incohérente
+est refusée. La recherche utilise les résultats affichés comme sélection.
+
+Chaque occurrence possède son propre identifiant, même lorsque son lien Spotify
+est identique à un autre. La file est locale et n’écrit pas dans la playlist ; ses
+modes et son contenu ne sont pas conservés après fermeture. Le retour précédent
+suit les titres effectivement écoutés, avec un historique borné à 200 entrées.
+L’aléatoire mélange les occurrences restantes du contexte, sans ajout de recommandations
+Smart Shuffle et sans reproduction de l’algorithme personnalisé de Spotify.
+
+Chaque chargement audio possède aussi un identifiant de sélection. Le moteur associe
+les accusés de chargement librespot à cette sélection ; une ancienne fin de morceau
+ne peut pas faire avancer une nouvelle lecture du même lien. Les commandes de
+lecture, pause et déplacement sont également rattachées à la sélection active.
+
+Le gestionnaire natif de dépôt Tauri est désactivé dans la fenêtre Windows pour
+permettre le glisser-déposer HTML des lignes. Ce réglage suit la
+[configuration officielle Tauri](https://v2.tauri.app/reference/config/#windowconfig).
+
+Les tests du lecteur couvrent les occurrences en double, la priorité des ajouts
+manuels, les modes de répétition, l’historique et les déplacements. Le retrait
+précis d’une occurrence est testé dans le modèle de file ; son clic n’a pas été
+rejoué dans l’application Windows.
+
 ## Version vérifiée
 
-Code : `327a6c4`. [Compilation Windows et tests](https://github.com/Kakune444/fastify/actions/runs/38822841513)
-réussis : huit tests TypeScript et dix tests Rust. L’exécutable release de cette
-compilation a été relancé localement et s’est reconnecté au coffre Windows. Les
-Titres likés, leur état, le visuel violet et le passage à la deuxième page ont été
-vérifiés dans cette version : les titres 39 et suivants s’affichent après les 38
-titres de la première page.
-Les formulaires et le sélecteur ont été vérifiés dans `8aa06b2`, dont le code
-d’interface est identique hormis la correction des deux sélecteurs CSS de favoris.
-Les essais de mutations ont été répétés avec la sonde de `2886e1e`, qui partage le
-même service Rust que `327a6c4`.
+Code : `ae7d155`. [Compilation Windows et tests](https://github.com/Kakune444/fastify/actions/runs/38952166028)
+réussis : vingt tests TypeScript et douze tests Rust. L’exécutable release de cette
+compilation a été installé localement. La reconnexion au coffre Windows, les
+favoris, le chargement sans débordement du bouton et le démarrage audio ont été
+vérifiés. Le déplacement d’un titre dans la file, la conservation
+du morceau en cours et la lecture directe du titre déplacé ont été vérifiés dans
+`bf6a406` ; seul le style de chargement du bouton de lecture a changé depuis.
+
+L’aléatoire sur le contexte complet, le passage au titre affiché dans la file,
+la répétition d’un titre après sa fin réelle et le retour de la fin d’une playlist
+à son début ont été vérifiés dans `162e4cf`. L’ajout prioritaire d’une occurrence
+en double puis le retour à la sélection ont également été vérifiés. La sonde de
+cette version a relu les liens de tous les favoris et leur état sans mutation.
+
+Les essais de mutations de favoris et de playlists restent ceux de `2886e1e`,
+avec le même service Rust d’écriture. Les formulaires et le sélecteur avaient été
+vérifiés dans `8aa06b2`, puis le visuel et la pagination des favoris dans `327a6c4`.

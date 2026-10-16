@@ -13,6 +13,9 @@ un compte réel : connexion OAuth, reconnexion après redémarrage, accueil,
 recherche, bibliothèque paginée, albums et playlists, lecture Rust, pause et déplacement dans le morceau.
 Les favoris et l’édition des playlists utilisent aussi les services internes Spotify :
 création privée, nom et description, ajout, retrait d’une occurrence et déplacement.
+La file locale prend en charge la lecture aléatoire, la répétition de la sélection
+ou d’un titre, l’ajout de morceaux et leur réorganisation. Elle reste indépendante
+de la file des autres appareils Spotify Connect.
 Les autres parcours sont suivis dans [l'état des fonctions](docs/STATUS.md).
 **La parité Spotify n'est pas atteinte et aucun gain de performance global n'est
 encore démontré.**
@@ -50,6 +53,11 @@ bibliothèque crée une playlist. Le menu « … » d’un titre permet de l’a
 playlist modifiable, ou de le retirer de la playlist ouverte. Les playlists
 modifiables proposent « Modifier les informations ». Glisser un titre change son
 ordre ; `Alt` + `↑` / `↓` déplace aussi la ligne qui a le focus.
+
+Les boutons habituels du lecteur activent l’aléatoire et font défiler les modes de
+répétition : désactivée, sélection entière, titre seul. Le menu « … » ajoute aussi
+un titre à la file d’attente. Dans la file, on peut déplacer les titres, en choisir
+un à lire ensuite ou retirer une occurrence. Cela ne modifie pas la playlist.
 
 ## Suivi
 
