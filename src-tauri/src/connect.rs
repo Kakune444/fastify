@@ -100,6 +100,27 @@ pub struct ConnectView {
     pub restrictions: Restrictions,
 }
 
+fn transfer_ready(current: &ConnectView, previous: &ConnectView, destination: &str) -> bool {
+    if current.active_device_id != destination {
+        return false;
+    }
+    if destination != current.local_device_id {
+        return true;
+    }
+    // Ownership arrives before librespot finishes resolving the transferred context.
+    // A paused receiver also sets the buffering bit after it has finished loading.
+    if let Some(track) = &previous.track {
+        if !current
+            .track
+            .as_ref()
+            .is_some_and(|t| t.uri == track.uri && t.duration_ms > 0)
+        {
+            return false;
+        }
+    }
+    current.queue.len() >= previous.queue.len().min(2)
+}
+
 pub struct ConnectModel {
     local: String,
     pub cluster: Option<Cluster>,
@@ -598,7 +619,7 @@ impl ConnectRuntime {
                 let mut updates = self.subscribe();
                 return tokio::time::timeout(Duration::from_secs(12), async {
                     loop {
-                        if self.view().await.active_device_id == device_id {
+                        if transfer_ready(&self.view().await, &view, &device_id) {
                             return Ok(());
                         }
                         updates
@@ -1018,5 +1039,19 @@ mod tests {
             m.cluster.as_ref().unwrap().player_state.next_tracks.len(),
             3
         );
+    }
+
+    #[test]
+    fn transferring_to_the_receiver_waits_for_context_resolution_before_another_handoff() {
+        let mut m = ConnectModel::new("local".into());
+        m.apply(cluster(1));
+        let before = m.view();
+        let mut loading = before.clone();
+        loading.active_device_id = "local".into();
+        loading.queue.clear();
+        assert!(!transfer_ready(&loading, &before, "local"));
+        loading.queue = before.queue.clone();
+        assert!(transfer_ready(&loading, &before, "local"));
+        assert!(transfer_ready(&before, &loading, "phone"));
     }
 }

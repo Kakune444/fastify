@@ -282,6 +282,7 @@ async fn diagnose_connect_actions(
             println!("CONNECT_TRANSFER_IN_OK: position_and_pause_preserved");
         }
         let local = runtime.view().await;
+        println!("CONNECT_TRANSFER_SOURCE_READY: queue={}", local.queue.len());
         runtime
             .execute(
                 ConnectAction::Transfer {
