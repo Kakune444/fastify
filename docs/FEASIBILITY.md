@@ -51,7 +51,7 @@ de compte, titre écouté ni contenu de capture n'est publié.
 ## Questions à résoudre par le prototype
 
 1. Quelles requêtes chargent l'accueil, les playlists et la recherche ?
-2. Comment établir et renouveler une session propre à Fastify ? Un jeton capturé
+2. Comment établir et renouveler une session propre à Spotisloth ? Un jeton capturé
    expirant n'est pas une solution de connexion durable.
 3. Quel mécanisme lit réellement l'audio dans Tauri, sans dépendre d'un client
    Spotify ouvert ? Les métadonnées et commandes Connect seules ne suffisent pas.
@@ -91,13 +91,13 @@ avec le type `application/vnd.collection-v2.spotify.proto`. Les champs du protoc
 sont décrits dans [les schémas librespot](https://github.com/librespot-org/librespot/blob/v0.8.0/protocol/proto/collection2v2.proto)
 et corroborés par [le client go-librespot](https://github.com/devgianlu/go-librespot/blob/master/spclient/library_write.go).
 Le schéma collection présent dans les sources de librespot 0.8.0 n’est pas exporté
-par son module Rust compilé : Fastify génère le petit sous-ensemble nécessaire.
+par son module Rust compilé : Spotisloth génère le petit sous-ensemble nécessaire.
 
 L’édition utilise les opérations `ListChanges` du protocole playlist, accompagnées
 de la révision courante. La création par `POST /playlist/v2/playlist`, l’ajout dans
 la rootlist et le service de permission ont été relevés dans les ressources
 publiques du client [Spotify Web](https://open.spotify.com/), puis testés sur le
-compte local. L’implémentation de Fastify est propre au projet.
+compte local. L’implémentation de Spotisloth est propre au projet.
 
 La sonde confirme l’ajout et le retrait d’un favori. Une playlist privée temporaire
 a servi à vérifier le nom, la description, l’ajout, le retrait d’une occurrence

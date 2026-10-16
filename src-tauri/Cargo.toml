@@ -1,12 +1,12 @@
 [package]
-name = "fastify-desktop"
+name = "spotisloth-desktop"
 version = "0.1.0"
 description = "Lightweight Spotify desktop client"
 edition = "2024"
 publish = false
 
 [lib]
-name = "fastify_lib"
+name = "spotisloth_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

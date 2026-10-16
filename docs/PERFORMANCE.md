@@ -9,7 +9,7 @@ mémoire partagées peuvent être comptées plusieurs fois.
 
 ## Relevé du prototype Windows
 
-Le 15 octobre 2026, après connexion puis redémarrage de Fastify, 15 échantillons
+Le 15 octobre 2026, après connexion puis redémarrage de Spotisloth, 15 échantillons
 espacés d'une seconde ont été relevés, avec tous les descendants WebView2.
 Le client affichait l'accueil réel, sans lecture. La médiane de mémoire privée
 était de **251,38 Mio**, sur sept processus ; le CPU moyen était arrondi à 0 %.
@@ -22,7 +22,7 @@ permettent pas de calculer un gain à fonctionnalités équivalentes.
 
 ## Comparaison à réaliser
 
-Tester Spotify et Fastify release sur le même PC, compte et réseau, à tour de rôle.
+Tester Spotify et Spotisloth release sur le même PC, compte et réseau, à tour de rôle.
 Fermer les applications avant les mesures à froid. Faire cinq passages par scénario.
 
 | Scénario                             | Mesures                                                            |
@@ -33,7 +33,7 @@ Fermer les applications avant les mesures à froid. Faire cinq passages par scé
 | Playlist longue                      | Réactivité au défilement, mémoire après parcours                   |
 | Lecture pendant 10 minutes           | Coupures, CPU, mémoire et croissance des caches                    |
 
-Inclure le processus Rust et **tous ses descendants WebView2** dans la mesure Fastify.
+Inclure le processus Rust et **tous ses descendants WebView2** dans la mesure Spotisloth.
 Ne pas comparer un shell vide avec un Spotify lisant de la musique. Indiquer les
 fonctions absentes et conserver les résultats bruts localement.
 
@@ -48,7 +48,7 @@ totale de la machine), sans enregistrer les lignes de commande ni informations d
 
 ```powershell
 ./tools/Measure-Client.ps1 -Client Spotify -Seconds 15 -OutputPath .local/spotify-idle.json
-./tools/Measure-Client.ps1 -Client Fastify -Seconds 15 -OutputPath .local/fastify-idle.json
+./tools/Measure-Client.ps1 -Client Spotisloth -Seconds 15 -OutputPath .local/spotisloth-idle.json
 ```
 
 Le premier échantillon CPU est ignoré ; une application doit déjà être ouverte.

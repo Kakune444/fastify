@@ -11,16 +11,16 @@ Compiler `spotify-probe` sur Windows avec les prérequis Rust MSVC :
 cargo build --release --locked --manifest-path tools/spotify-probe/Cargo.toml
 ```
 
-Après une connexion normale à Fastify, vérifier la réutilisation de sa session
+Après une connexion normale à Spotisloth, vérifier la réutilisation de sa session
 et la première page de bibliothèque :
 
 ```powershell
 ./tools/spotify-probe/target/release/spotify-probe.exe --stored --library
 ```
 
-Seule l'entrée du coffre appartenant à Fastify est lue. La sortie affiche des
+Seule l'entrée du coffre appartenant à Spotisloth est lue. La sortie affiche des
 résultats et des compteurs, sans identifiants ni jetons. `--library` est en lecture
-seule. Si `FASTIFY_DIAGNOSTIC_DIR` est défini, la réponse d'images est enregistrée
+seule. Si `SPOTISLOTH_DIAGNOSTIC_DIR` est défini, la réponse d'images est enregistrée
 dans ce dossier ; utiliser uniquement un dossier local ignoré comme `.local`.
 
 Le mode historique accepte aussi un fichier JSON local avec `accessToken` et un

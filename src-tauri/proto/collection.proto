@@ -1,5 +1,5 @@
 syntax = "proto3";
-package fastify.spotify.collection;
+package spotisloth.spotify.collection;
 
 message CollectionItem {
   string uri = 1;

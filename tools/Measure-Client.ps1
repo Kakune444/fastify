@@ -1,11 +1,11 @@
 param(
-    [Parameter(Mandatory=$true)][ValidateSet('Spotify','Fastify')][string]$Client,
+    [Parameter(Mandatory=$true)][ValidateSet('Spotify','Spotisloth')][string]$Client,
     [ValidateRange(3,300)][int]$Seconds=15,
     [string]$OutputPath
 )
 
 $ErrorActionPreference='Stop'
-$rootName=if($Client -eq 'Spotify'){'Spotify.exe'}else{'fastify-desktop.exe'}
+$rootName=if($Client -eq 'Spotify'){'Spotify.exe'}else{'spotisloth-desktop.exe'}
 $samples=[Collections.Generic.List[object]]::new()
 $previousCpu=@{}
 $previousSample=[DateTime]::UtcNow

@@ -385,9 +385,10 @@ async fn connect_spotify(
         return get_status(state.clone()).await;
     }
     let config = SessionConfig::default();
-    let vault = keyring::Entry::new("fastify-desktop", "spotify-session")
+    let vault = keyring::Entry::new("spotisloth-desktop", "spotify-session")
         .map_err(|_| error("STORAGE", "Le coffre Windows est indisponible."))?;
-    let local = std::env::var_os("FASTIFY_SESSION_FILE")
+    let local = std::env::var_os("SPOTISLOTH_SESSION_FILE")
+        .or_else(|| std::env::var_os("FASTIFY_SESSION_FILE"))
         .and_then(|p| std::fs::read(p).ok())
         .and_then(|b| {
             serde_json::from_slice::<ImportedAuth>(
@@ -399,7 +400,10 @@ async fn connect_spotify(
     let credentials = if let Some(auth) = local {
         *state.imported.lock().await = Some(auth.clone());
         Credentials::with_access_token(auth.access_token)
-    } else if let Ok(saved) = vault.get_password() {
+    } else if let Ok(saved) = vault
+        .get_password()
+        .or_else(|_| keyring::Entry::new("fastify-desktop", "spotify-session")?.get_password())
+    {
         serde_json::from_str(&saved)
             .map_err(|_| error("STORAGE", "La session enregistrée n'est plus valide."))?
     } else if interactive {
@@ -407,7 +411,7 @@ async fn connect_spotify(
         let token = tauri::async_runtime::spawn_blocking(move || {
             OAuthClientBuilder::new(&client_id, "http://127.0.0.1:8898/login", vec!["streaming"])
                 .open_in_browser()
-                .with_custom_message("Connexion terminée. Vous pouvez revenir dans Fastify.")
+                .with_custom_message("Connexion terminée. Vous pouvez revenir dans Spotisloth.")
                 .build()
                 .and_then(|client| client.get_access_token())
         })
@@ -555,14 +559,16 @@ async fn disconnect_spotify(state: State<'_, Arc<Backend>>) -> Result<()> {
     state.imported.lock().await.take();
     state.cache.lock().await.clear();
     *state.playback.lock().await = Playback::default();
-    if let Ok(entry) = keyring::Entry::new("fastify-desktop", "spotify-session") {
-        match entry.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => {}
-            Err(_) => {
-                return Err(error(
-                    "STORAGE",
-                    "La session locale n'a pas pu être supprimée.",
-                ));
+    for service in ["spotisloth-desktop", "fastify-desktop"] {
+        if let Ok(entry) = keyring::Entry::new(service, "spotify-session") {
+            match entry.delete_credential() {
+                Ok(()) | Err(keyring::Error::NoEntry) => {}
+                Err(_) => {
+                    return Err(error(
+                        "STORAGE",
+                        "La session locale n'a pas pu être supprimée.",
+                    ));
+                }
             }
         }
     }
@@ -1136,7 +1142,7 @@ pub fn run() {
             }
         })
         .run(tauri::generate_context!())
-        .expect("Fastify could not start");
+        .expect("Spotisloth could not start");
 }
 
 #[cfg(test)]

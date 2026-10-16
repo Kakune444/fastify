@@ -60,7 +60,7 @@ seulement à l’ouverture du sélecteur ; leur contenu n’est pas préchargé.
 
 ## Vérification des mutations Spotify
 
-La sonde utilise la session de Fastify dans le coffre Windows. Le test de favori
+La sonde utilise la session de Spotisloth dans le coffre Windows. Le test de favori
 choisit un titre initialement absent, confirme son ajout, puis confirme son retrait.
 Le test de playlist crée un élément privé temporaire, vérifie les opérations et
 le retire de la bibliothèque à la fin. Il vérifie aussi qu’une ancienne révision
@@ -105,7 +105,7 @@ rejoué dans l’application Windows.
 
 ## Version vérifiée
 
-Code : `ae7d155`. [Compilation Windows et tests](https://github.com/Kakune444/fastify/actions/runs/38952166028)
+Code : `ae7d155`. [Compilation Windows et tests](https://github.com/Kakune444/spotisloth/actions/runs/38952166028)
 réussis : vingt tests TypeScript et douze tests Rust. L’exécutable release de cette
 compilation a été installé localement. La reconnexion au coffre Windows, les
 favoris, le chargement sans débordement du bouton et le démarrage audio ont été

@@ -998,7 +998,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "fastify-desktop"
+name = "spotisloth-desktop"
 version = "0.1.0"
 dependencies = [
  "futures-util",

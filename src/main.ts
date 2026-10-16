@@ -168,7 +168,7 @@ const byId = <T extends HTMLElement = HTMLElement>(id: string): T =>
 
 byId("app").innerHTML = `
   <header class="topbar">
-    <a class="brand" href="#" aria-label="Fastify, accueil">${icon("music")}<strong>Fastify</strong></a>
+    <a class="brand" href="#" aria-label="Spotisloth, accueil">${icon("music")}<strong>Spotisloth</strong></a>
     <div class="top-center"><button class="round home-button" id="home" aria-label="Accueil">${icon("home")}</button>
       <label class="search-box">${icon("search")}<input id="search" type="search" maxlength="200" placeholder="Que souhaitez-vous écouter ?" aria-label="Rechercher dans Spotify" autocomplete="off" spellcheck="false"/><span class="search-hint">Ctrl K</span></label>
     </div>
@@ -645,7 +645,7 @@ async function startTrack(uri: string, position?: number): Promise<void> {
   if (!status.nativeReady) return;
   if (!/^spotify:track:[A-Za-z0-9]{22}$/.test(uri)) {
     showError({
-      message: "Ce type de contenu ne peut pas encore être lu dans Fastify.",
+      message: "Ce type de contenu ne peut pas encore être lu dans Spotisloth.",
     });
     return;
   }
@@ -860,7 +860,7 @@ async function connect(interactive: boolean): Promise<void> {
   if (!isTauri()) {
     if (interactive)
       showError({
-        message: "Ouvrez l’application Windows Fastify pour vous connecter.",
+        message: "Ouvrez l’application Windows Spotisloth pour vous connecter.",
       });
     return;
   }

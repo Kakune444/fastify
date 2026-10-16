@@ -1,7 +1,7 @@
 # Plan de création
 
 Choix validé : Rust + Tauri 2, interface TypeScript. Cible initiale : Windows x64.
-Le nom du dépôt public est `fastify`. Pas de nouvelles fonctionnalités produit.
+Le nom du dépôt public est `spotisloth`. Pas de nouvelles fonctionnalités produit.
 
 Avant chaque commit de jalon, présenter à l'utilisateur 4–5 lignes : résultat,
 vérifications effectuées, limites et prochaine étape. Un commit par étape validée ;

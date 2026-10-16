@@ -1,10 +1,10 @@
-# Fastify
+# Spotisloth
 
 Client Spotify pour Windows, développé en Rust, Tauri et TypeScript.
 Objectif : retrouver l'interface et les fonctions habituelles avec une consommation
 mesurée, sans ajouter de nouvelles fonctions produit.
 
-Projet indépendant, sans affiliation à Spotify ni au framework web Fastify.
+Projet indépendant, sans affiliation à Spotify. Ancien nom : Fastify.
 
 ## État
 
@@ -33,10 +33,10 @@ npm run tauri dev
 La connexion s'effectue dans le navigateur système. Le prototype utilise le flux
 OAuth de librespot. Sa compatibilité doit être vérifiée avec chaque compte ; un
 compte Premium est requis pour le moteur librespot. Les identifiants réutilisables
-sont conservés dans le coffre Windows. Aucun mot de passe n'est demandé par Fastify.
+sont conservés dans le coffre Windows. Aucun mot de passe n'est demandé par Spotisloth.
 
 Pour le diagnostic local uniquement, on peut fournir un fichier ignoré par Git via
-`FASTIFY_SESSION_FILE`. Ce mécanisme temporaire n'est pas la connexion normale.
+`SPOTISLOTH_SESSION_FILE`. Ce mécanisme temporaire n'est pas la connexion normale.
 
 ```powershell
 npm run check
