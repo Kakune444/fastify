@@ -218,7 +218,7 @@ function cover(card: Pick<Card, "image" | "name" | "kind">, cls = ""): string {
     return `<span class="cover liked-cover ${cls}">${icon("heart")}</span>`;
   const image = imageUrl(card.image);
   return image
-    ? `<img class="cover ${cls} ${card.kind === "artist" ? "artist-cover" : ""}" src="${esc(image)}" alt="" loading="lazy" decoding="async"/>`
+    ? `<img class="cover ${cls} ${card.kind === "artist" ? "artist-cover" : ""}" src="${esc(image)}" alt="" draggable="false" loading="lazy" decoding="async"/>`
     : `<span class="cover placeholder ${cls}">${icon("music")}</span>`;
 }
 
