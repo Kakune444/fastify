@@ -216,7 +216,9 @@ impl ConnectModel {
             .filter(|t| !t.uri.is_empty())
             .map(|t| track_view(t, p.duration.max(0).min(u32::MAX as i64) as u32));
         view.playing = p.is_playing && !p.is_paused && !p.is_buffering;
-        view.loading = p.is_buffering;
+        // Connect encodes ordinary pauses with all three status flags set.
+        // Paused takes precedence so that the resume control stays available.
+        view.loading = p.is_buffering && !p.is_paused;
         let elapsed = if view.playing {
             now_ms().saturating_sub(p.timestamp).max(0)
         } else {
@@ -917,5 +919,20 @@ mod tests {
             .unwrap()
             .is_paused = false;
         assert_eq!(m.view().position_ms, 1000);
+    }
+
+    #[test]
+    fn a_paused_connect_state_with_the_buffering_bit_keeps_resume_available() {
+        let mut m = ConnectModel::new("local".into());
+        let mut c = cluster(1);
+        let p = c.player_state.as_mut().unwrap();
+        p.is_playing = true;
+        p.is_paused = true;
+        p.is_buffering = true;
+        m.apply(c);
+        let view = m.view();
+        assert!(!view.playing);
+        assert!(!view.loading);
+        assert!(!view.restrictions.resume);
     }
 }
