@@ -43,11 +43,19 @@ et commandes du lecteur doivent aussi être vérifiés dans l’exécutable Taur
 
 `--connect-transfer-roundtrip` transfère la lecture active vers le récepteur de
 diagnostic, puis vers l’appareil d’origine. `--connect-queue-roundtrip` ajoute le
-titre courant et retire uniquement la nouvelle occurrence identifiée par son UID.
+titre courant et retire uniquement la nouvelle occurrence confirmée dans la file.
+Le serveur peut renuméroter les UID : la sonde vérifie donc aussi le préfixe manuel
+et l’ordre des autres titres avant le retrait.
 Ces deux modes modifient réellement la lecture ; les exécuter séparément avec le
 lecteur en pause et fermer Spotisloth auparavant. Les réponses affichées décrivent
 les compteurs, les types et les noms des champs ; elles ne contiennent ni URI,
 nom d’appareil, identifiant du compte, ni jeton.
+
+Après un diagnostic interrompu seulement, `--connect-cleanup-test-prefix=N` peut
+retirer de une à trois occurrences de test en tête. Vérifier auparavant que ces
+occurrences ont bien été créées par le test. La sonde refuse un autre titre ou un
+élément provenant du contexte ; ce mode ne doit pas servir à nettoyer une file
+personnelle sans vérification.
 
 ## Ressources
 

@@ -52,6 +52,7 @@ pub struct ConnectTrack {
 #[serde(rename_all = "camelCase")]
 pub struct QueueTrack {
     pub key: String,
+    pub queued: bool,
     #[serde(flatten)]
     pub track: ConnectTrack,
 }
@@ -245,8 +246,13 @@ impl ConnectModel {
             .next_tracks
             .iter()
             .enumerate()
+            .filter(|(_, t)| {
+                t.uri != "spotify:delimiter" && t.metadata.get("hidden").is_none_or(|v| v != "true")
+            })
             .map(|(i, t)| QueueTrack {
                 key: format!("{i}:{}", t.uid),
+                queued: t.provider == "queue"
+                    || t.metadata.get("is_queued").is_some_and(|v| v == "true"),
                 track: track_view(t, 0),
             })
             .collect();
@@ -271,10 +277,15 @@ impl ConnectModel {
         if revision != self.revision() {
             return Err(ConnectError::Conflict);
         }
-        self.view()
-            .queue
+        self.cluster
+            .as_ref()
+            .ok_or(ConnectError::NotReady)?
+            .player_state
+            .next_tracks
             .iter()
-            .position(|t| t.key == key)
+            .enumerate()
+            .find(|(i, t)| format!("{i}:{}", t.uid) == key)
+            .map(|(i, _)| i)
             .ok_or(ConnectError::Missing)
     }
 }
@@ -562,7 +573,12 @@ impl ConnectRuntime {
                 drop(m);
                 self.send(
                     &format!("/connect-state/v1/connect/transfer/from/{local}/to/{device_id}"),
-                    Some(json!({"transfer_options":{}})),
+                    Some(json!({"transfer_options":{
+                        "restore_paused":"restore",
+                        "restore_position":if view.playing {"extrapolate"} else {"last_known"},
+                        "restore_track":"always_play_something",
+                        "retain_session":"do_not_retain"
+                    }})),
                 )
                 .await?;
                 let mut updates = self.subscribe();
@@ -816,9 +832,8 @@ impl ConnectRuntime {
                         if view.restrictions.edit_queue {
                             return Err(ConnectError::Restricted);
                         }
-                        if to >= tracks.len() {
-                            return Err(ConnectError::Input);
-                        }
+                        let destination = view.queue.get(to).ok_or(ConnectError::Input)?;
+                        let to = m.queue_index(&view.revision, &destination.key)?;
                         let t = tracks.remove(index);
                         tracks.insert(to, t);
                         json!({"endpoint":"set_queue","next_tracks":tracks.iter().map(encode).collect::<Result<Vec<_>>>()?,"prev_tracks":p.prev_tracks.iter().map(encode).collect::<Result<Vec<_>>>()?,"queue_revision":p.queue_revision})
@@ -964,5 +979,29 @@ mod tests {
         assert!(!view.playing);
         assert!(!view.loading);
         assert!(!view.restrictions.resume);
+    }
+
+    #[test]
+    fn hidden_context_delimiters_are_preserved_but_never_displayed_as_tracks() {
+        let mut m = ConnectModel::new("local".into());
+        let mut c = cluster(1);
+        let p = c.player_state.as_mut().unwrap();
+        let mut delimiter = ProvidedTrack::new();
+        delimiter.uri = "spotify:delimiter".into();
+        delimiter.uid = "delimiter0".into();
+        p.next_tracks.insert(1, delimiter);
+        p.next_tracks[0].provider = "queue".into();
+        m.apply(c);
+        let view = m.view();
+        assert_eq!(view.queue.len(), 2);
+        assert!(view.queue[0].queued);
+        assert_eq!(
+            m.queue_index(&view.revision, &view.queue[1].key).unwrap(),
+            2
+        );
+        assert_eq!(
+            m.cluster.as_ref().unwrap().player_state.next_tracks.len(),
+            3
+        );
     }
 }

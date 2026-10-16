@@ -219,6 +219,9 @@ async fn diagnose_connect_actions(
         if initial.active_device_id.is_empty() || initial.track.is_none() {
             return Err("An active playback is required".into());
         }
+        if initial.playing {
+            return Err("Pause playback before the transfer diagnostic".into());
+        }
         runtime
             .execute(
                 ConnectAction::Transfer {
@@ -228,7 +231,19 @@ async fn diagnose_connect_actions(
             )
             .await
             .map_err(|e| format!("Connect transfer in: {e:?}"))?;
-        println!("CONNECT_TRANSFER_IN_OK");
+        let matches_original = |v: &connect::ConnectView| {
+            v.track.as_ref().map(|t| &t.uri) == initial.track.as_ref().map(|t| &t.uri)
+                && !v.playing
+                && !v.loading
+                && v.position_ms.abs_diff(initial.position_ms) <= 1000
+        };
+        let inbound = wait_connect(runtime, |v| {
+            v.active_device_id == initial.local_device_id && matches_original(v)
+        })
+        .await;
+        if inbound.is_ok() {
+            println!("CONNECT_TRANSFER_IN_OK: position_and_pause_preserved");
+        }
         let local = runtime.view().await;
         runtime
             .execute(
@@ -240,6 +255,12 @@ async fn diagnose_connect_actions(
             .await
             .map_err(|e| format!("Connect transfer out: {e:?}"))?;
         println!("CONNECT_TRANSFER_OUT_OK");
+        wait_connect(runtime, |v| {
+            v.active_device_id == initial.active_device_id && matches_original(v)
+        })
+        .await?;
+        println!("CONNECT_TRANSFER_RESTORE_OK: position_and_pause_preserved");
+        inbound?;
     }
     if std::env::args().any(|a| a == "--connect-queue-roundtrip") {
         let initial = runtime.view().await;
@@ -250,17 +271,9 @@ async fn diagnose_connect_actions(
             .uri
             .clone();
         let before = initial.queue.iter().filter(|t| t.track.uri == uri).count();
-        let uids = initial
-            .queue
-            .iter()
-            .map(|t| {
-                t.key
-                    .split_once(':')
-                    .map(|(_, uid)| uid)
-                    .unwrap_or("")
-                    .to_owned()
-            })
-            .collect::<std::collections::HashSet<_>>();
+        // Spotify may renumber the UIDs of all manually queued tracks after an add.
+        // The new occurrence is appended after the existing manual prefix.
+        let insertion = initial.queue.iter().take_while(|t| t.queued).count();
         runtime
             .execute(
                 ConnectAction::Add { uri: uri.clone() },
@@ -278,23 +291,31 @@ async fn diagnose_connect_actions(
         );
         let changed = changed?;
         println!("CONNECT_QUEUE_ADD_OK");
-        let candidates = changed
+        let inserted = changed
+            .queue
+            .get(insertion)
+            .ok_or("Missing inserted occurrence")?;
+        let remaining = changed
             .queue
             .iter()
-            .filter(|t| {
-                t.track.uri == uri
-                    && t.key
-                        .split_once(':')
-                        .is_some_and(|(_, uid)| !uid.is_empty() && !uids.contains(uid))
-            })
+            .enumerate()
+            .filter(|(i, _)| *i != insertion)
+            .map(|(_, t)| t)
             .collect::<Vec<_>>();
-        if candidates.len() != 1 {
+        if inserted.track.uri != uri
+            || !inserted.queued
+            || remaining.len() > initial.queue.len()
+            || !remaining
+                .iter()
+                .zip(&initial.queue)
+                .all(|(a, b)| a.track.uri == b.track.uri && a.queued == b.queued)
+        {
             return Err("New queue occurrence could not be identified safely".into());
         }
         runtime
             .execute(
                 ConnectAction::Remove {
-                    key: candidates[0].key.clone(),
+                    key: inserted.key.clone(),
                     revision: changed.revision.clone(),
                 },
                 Some(&changed.active_device_id),
@@ -306,6 +327,60 @@ async fn diagnose_connect_actions(
         })
         .await?;
         println!("CONNECT_QUEUE_REMOVE_OK");
+    }
+    if let Some(count) = std::env::args().find_map(|a| {
+        a.strip_prefix("--connect-cleanup-test-prefix=")
+            .and_then(|n| n.parse::<usize>().ok())
+    }) {
+        if !(1..=3).contains(&count) {
+            return Err("Test prefix count must be 1..=3".into());
+        }
+        let initial = runtime.view().await;
+        let uri = initial
+            .track
+            .as_ref()
+            .ok_or("An active track is required")?
+            .uri
+            .clone();
+        if initial.queue.len() < count
+            || !initial.queue[..count]
+                .iter()
+                .all(|t| t.queued && t.track.uri == uri)
+        {
+            return Err("The previously verified test prefix is no longer present".into());
+        }
+        for _ in 0..count {
+            let view = runtime.view().await;
+            let first = view.queue.first().ok_or("Test prefix changed")?;
+            if first.track.uri != uri || !first.queued {
+                return Err("Test prefix changed".into());
+            }
+            let before = view
+                .queue
+                .iter()
+                .filter(|t| t.queued && t.track.uri == uri)
+                .count();
+            runtime
+                .execute(
+                    ConnectAction::Remove {
+                        key: first.key.clone(),
+                        revision: view.revision.clone(),
+                    },
+                    Some(&view.active_device_id),
+                )
+                .await
+                .map_err(|e| format!("Test cleanup: {e:?}"))?;
+            wait_connect(runtime, |v| {
+                v.queue
+                    .iter()
+                    .filter(|t| t.queued && t.track.uri == uri)
+                    .count()
+                    + 1
+                    == before
+            })
+            .await?;
+        }
+        println!("CONNECT_TEST_PREFIX_CLEANED: count={count}");
     }
     Ok(())
 }

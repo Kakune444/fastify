@@ -30,7 +30,7 @@ export type ConnectState = {
   repeat: RepeatMode;
   revision: string;
   contextName: string;
-  queue: (ConnectTrack & { key: string })[];
+  queue: (ConnectTrack & { key: string; queued: boolean })[];
   restrictions: {
     pause: boolean;
     resume: boolean;

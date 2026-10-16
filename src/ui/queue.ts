@@ -7,6 +7,7 @@ type Hooks = {
   cover: (card: Card) => string;
   save: (uri: string) => string;
   menu: (uri: string, position?: number, queueId?: number) => string;
+  queued: (id: number) => boolean;
   rendered: (uris: string[]) => void;
   error: (error: unknown) => void;
 };
@@ -39,11 +40,20 @@ export class QueueView {
     if (!this.hooks.active()) return;
     const current = this.queue.current;
     const upcoming = this.queue.upcoming.slice(0, this.visible);
+    const rows = upcoming
+      .map((entry, index) => {
+        const queued = this.hooks.queued(entry.id);
+        const heading =
+          index === 0 || queued !== this.hooks.queued(upcoming[index - 1].id)
+            ? `<h2>${queued ? "À suivre dans la file d’attente" : `À suivre${this.queue.name ? ` · ${esc(this.queue.name)}` : ""}`}</h2>`
+            : "";
+        return heading + this.row(entry, index);
+      })
+      .join("");
     document.getElementById("main-content")!.innerHTML =
       `<div class="queue-page"><h1>File d’attente</h1>
       ${current ? `<h2>En cours de lecture</h2>${this.row(current, 0, true)}` : ""}
-      <h2>À suivre${this.queue.name ? ` · ${esc(this.queue.name)}` : ""}</h2>
-      ${upcoming.length ? upcoming.map((entry, index) => this.row(entry, index)).join("") : '<p class="queue-empty">Aucun titre dans la file d’attente.</p>'}
+      ${upcoming.length ? rows : '<h2>À suivre</h2><p class="queue-empty">Aucun titre dans la file d’attente.</p>'}
       ${this.queue.upcoming.length > upcoming.length ? '<button class="pill" id="queue-more">Afficher plus</button>' : ""}</div>`;
     const uris = [
       ...new Set([
@@ -56,7 +66,9 @@ export class QueueView {
       .map((entry) => entry.track)
       .filter(
         (card) =>
-          card.name === "Chargement du titre…" && !this.pending.has(card.uri),
+          card.name === "Chargement du titre…" &&
+          /^spotify:track:[A-Za-z0-9]{22}$/.test(card.uri) &&
+          !this.pending.has(card.uri),
       );
     const batch = [...new Set(missing.map((card) => card.uri))].slice(0, 40);
     if (!batch.length) return;

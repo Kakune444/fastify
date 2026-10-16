@@ -77,6 +77,7 @@ let connectState = emptyConnectState();
 let connectPending = false;
 let connectEpoch = 0;
 const connectQueueKeys = new Map<number, string>();
+const connectQueued = new Set<number>();
 const connectMetadata = new Map<string, NativeTrack>();
 const metadataPending = new Set<string>();
 let queueDragSnapshot: {
@@ -103,6 +104,7 @@ const queueView = new QueueView(queue, {
   cover,
   save: savedButton,
   menu: menuButton,
+  queued: (id) => connectQueued.has(id),
   rendered: (uris) => {
     updateSavedButtons();
     void refreshSaved(uris);
@@ -771,6 +773,7 @@ function applyConnect(next: ConnectState): void {
     );
     queue.clear();
     connectQueueKeys.clear();
+    connectQueued.clear();
     queueView.reset();
     if (track) {
       queue.reset(
@@ -781,9 +784,10 @@ function applyConnect(next: ConnectState): void {
         0,
         next.contextName,
       );
-      queue.upcoming.forEach((e, i) =>
-        connectQueueKeys.set(e.id, next.queue[i].key),
-      );
+      queue.upcoming.forEach((e, i) => {
+        connectQueueKeys.set(e.id, next.queue[i].key);
+        if (next.queue[i].queued) connectQueued.add(e.id);
+      });
     }
   }
   queue.shuffle = next.shuffle;

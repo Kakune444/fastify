@@ -21,6 +21,7 @@ test("duplicate queue occurrences retain their own server keys", () => {
   state.queue = [
     {
       key: "0:first",
+      queued: true,
       uri: "same",
       name: "",
       artist: "",
@@ -30,6 +31,7 @@ test("duplicate queue occurrences retain their own server keys", () => {
     },
     {
       key: "1:second",
+      queued: false,
       uri: "same",
       name: "",
       artist: "",
@@ -68,6 +70,7 @@ test("queue move boundaries and repeat modes remain predictable", () => {
   state.queue = [
     {
       key: "a",
+      queued: false,
       uri: "u",
       name: "",
       artist: "",
