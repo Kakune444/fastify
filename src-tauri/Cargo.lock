@@ -998,27 +998,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "spotisloth-desktop"
-version = "0.1.0"
-dependencies = [
- "futures-util",
- "keyring",
- "librespot-core",
- "librespot-metadata",
- "librespot-oauth",
- "librespot-playback",
- "librespot-protocol",
- "protobuf",
- "protobuf-codegen",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tokio",
-]
-
-[[package]]
 name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2236,6 +2215,26 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+]
+
+[[package]]
+name = "librespot-connect"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4b2a21e9e19b906c6676b1a515fc5529d5414f69049f5a167dfb2ea3206e5a27"
+dependencies = [
+ "futures-util",
+ "librespot-core",
+ "librespot-playback",
+ "librespot-protocol",
+ "log",
+ "protobuf",
+ "rand 0.9.5",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-stream",
+ "uuid",
 ]
 
 [[package]]
@@ -4202,6 +4201,29 @@ checksum = "d91ed6c858b01f942cd56b37a94b3e0a1798290327d1236e4d9cf4eaca44d29d"
 dependencies = [
  "base64ct",
  "der",
+]
+
+[[package]]
+name = "spotisloth-desktop"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "keyring",
+ "librespot-connect",
+ "librespot-core",
+ "librespot-metadata",
+ "librespot-oauth",
+ "librespot-playback",
+ "librespot-protocol",
+ "protobuf",
+ "protobuf-codegen",
+ "protobuf-json-mapping",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tokio",
 ]
 
 [[package]]

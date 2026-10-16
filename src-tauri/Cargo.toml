@@ -23,6 +23,8 @@ librespot-core = { version = "=0.8.0", default-features = false, features = ["na
 librespot-metadata = "=0.8.0"
 librespot-protocol = "=0.8.0"
 librespot-playback = { version = "=0.8.0", default-features = false, features = ["rodio-backend"] }
+librespot-connect = { version = "=0.8.0", default-features = false, features = ["native-tls"] }
+protobuf-json-mapping = "3.7"
 librespot-oauth = { version = "=0.8.0", default-features = false, features = ["native-tls"] }
 keyring = { version = "3", features = ["windows-native"] }
 protobuf = "3.7"

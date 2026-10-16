@@ -12,6 +12,8 @@ use librespot_playback::{
 use protobuf::Message;
 use serde::Deserialize;
 use std::{path::PathBuf, time::Duration};
+#[path = "../../../src-tauri/src/connect.rs"]
+mod connect;
 #[path = "../../../src-tauri/src/library_api.rs"]
 mod library_api;
 
@@ -54,6 +56,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         )
     };
     let session = Session::new(SessionConfig::default(), None);
+    if std::env::args().any(|arg| arg == "--connect") {
+        return diagnose_connect(session, credentials).await;
+    }
     tokio::time::timeout(Duration::from_secs(30), session.connect(credentials, false)).await??;
     println!("SESSION_OK");
     if std::env::args().any(|arg| arg == "--playlist-roundtrip") {
@@ -105,6 +110,71 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     session.shutdown();
     result??;
     println!("PROBE_OK");
+    Ok(())
+}
+
+async fn diagnose_connect(
+    session: Session,
+    credentials: Credentials,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use librespot_playback::mixer::{Mixer, MixerConfig, softmixer::SoftMixer};
+    use std::sync::Arc;
+    let mixer = SoftMixer::open(MixerConfig::default())?;
+    let backend = audio_backend::find(Some("rodio".to_owned())).ok_or("No audio backend")?;
+    let player = Player::new(
+        PlayerConfig::default(),
+        session.clone(),
+        mixer.get_soft_volume(),
+        move || backend(None, AudioFormat::default()),
+    );
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    let runtime = connect::ConnectRuntime::start(
+        session.clone(),
+        credentials,
+        player,
+        Arc::new(mixer),
+        client,
+    )
+    .await
+    .map_err(|_| "Connect initialization failed")?;
+    println!("CONNECT_SESSION_OK");
+    let mut updates = runtime.subscribe();
+    let result = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let view = runtime.view().await;
+            if view.ready && view.devices.iter().any(|d| !d.local) {
+                println!(
+                    "CONNECT_DEVICES_OK: devices={} remote={} active={} queue={}",
+                    view.devices.len(),
+                    view.devices.iter().filter(|d| !d.local).count(),
+                    !view.active_device_id.is_empty(),
+                    view.queue.len()
+                );
+                return Ok::<(), &'static str>(());
+            }
+            updates
+                .changed()
+                .await
+                .map_err(|_| "Connect stream closed")?;
+        }
+    })
+    .await;
+    let view = runtime.view().await;
+    if result.is_err() {
+        println!(
+            "CONNECT_NO_REMOTE: ready={} devices={} active={}",
+            view.ready,
+            view.devices.len(),
+            !view.active_device_id.is_empty()
+        );
+    }
+    runtime.shutdown();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    session.shutdown();
+    result.map_err(|_| "Connect device updates were not confirmed")??;
     Ok(())
 }
 

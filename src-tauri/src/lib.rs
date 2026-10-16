@@ -8,26 +8,23 @@ use librespot_playback::{
     audio_backend,
     config::{AudioFormat, PlayerConfig},
     mixer::{Mixer, MixerConfig, softmixer::SoftMixer},
-    player::{Player, PlayerEvent},
+    player::Player,
 };
 use protobuf::Message;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::Arc,
     time::{Duration, Instant},
 };
 use tauri::{Emitter, Manager, State};
 use tokio::sync::{Mutex, Semaphore};
+mod connect;
 mod library_api;
-mod playback_loads;
+use connect::{ConnectAction, ConnectError, ConnectRuntime, ConnectView};
 use library_api::{LibraryApi, LibraryError};
 use library_api::{PlaylistEdit, playlist_permissions, revision_hex};
-use playback_loads::PlaybackLoads;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -37,6 +34,44 @@ struct AppError {
     retry_after_seconds: Option<u64>,
 }
 type Result<T> = std::result::Result<T, AppError>;
+impl From<ConnectError> for AppError {
+    fn from(value: ConnectError) -> Self {
+        match value {
+            ConnectError::Input => error("INPUT", "Commande Spotify Connect invalide."),
+            ConnectError::NotReady => error(
+                "CONNECT_NOT_READY",
+                "Spotify Connect se reconnecte. Réessayez dans un instant.",
+            ),
+            ConnectError::Missing => error(
+                "NOT_FOUND",
+                "Cet appareil ou ce titre n’est plus disponible.",
+            ),
+            ConnectError::Restricted => error(
+                "RESTRICTED",
+                "Cette commande n’est pas disponible sur cet appareil.",
+            ),
+            ConnectError::Conflict => error(
+                "CONFLICT",
+                "La lecture ou la file a changé. Vérifiez son état avant de recommencer.",
+            ),
+            ConnectError::RateLimited(wait) => AppError {
+                code: "RATE_LIMIT",
+                message: "Spotify demande de patienter avant de réessayer.",
+                retry_after_seconds: Some(wait),
+            },
+            ConnectError::Auth => error("AUTH_REQUIRED", "Reconnectez-vous à Spotify."),
+            ConnectError::Network => network_error("connect"),
+            ConnectError::Uncertain => error(
+                "UNCERTAIN",
+                "Spotify n’a pas confirmé la commande. Vérifiez la lecture avant de réessayer.",
+            ),
+            ConnectError::Protocol => error(
+                "API_CHANGED",
+                "La réponse Spotify Connect doit être adaptée.",
+            ),
+        }
+    }
+}
 fn error(code: &'static str, message: &'static str) -> AppError {
     AppError {
         code,
@@ -92,8 +127,7 @@ struct ImportedAuth {
 struct Native {
     session: Session,
     player: Arc<Player>,
-    mixer: SoftMixer,
-    loads: Arc<Mutex<PlaybackLoads>>,
+    connect: Arc<ConnectRuntime>,
 }
 struct Backend {
     client: reqwest::Client,
@@ -102,11 +136,9 @@ struct Backend {
     connection: Mutex<()>,
     requests: Semaphore,
     metadata: Semaphore,
-    selection: AtomicU64,
     writes: Mutex<()>,
     cooldown: Mutex<Option<Instant>>,
     cache: Mutex<HashMap<String, (Instant, Value)>>,
-    playback: Mutex<Playback>,
 }
 
 #[derive(Clone, Default, Serialize)]
@@ -118,17 +150,6 @@ struct TrackView {
     album: String,
     image: String,
     duration_ms: u32,
-}
-#[derive(Clone, Default, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct Playback {
-    selection: String,
-    track: Option<TrackView>,
-    playing: bool,
-    loading: bool,
-    position_ms: u32,
-    unavailable: bool,
-    ended: bool,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -232,11 +253,9 @@ impl Backend {
             connection: Mutex::new(()),
             requests: Semaphore::new(3),
             metadata: Semaphore::new(4),
-            selection: AtomicU64::new(0),
             writes: Mutex::new(()),
             cooldown: Mutex::new(None),
             cache: Mutex::new(HashMap::new()),
-            playback: Mutex::new(Playback::default()),
         }
     }
     async fn session(&self) -> Result<Session> {
@@ -384,7 +403,26 @@ async fn connect_spotify(
     if state.session().await.is_ok() {
         return get_status(state.clone()).await;
     }
-    let config = SessionConfig::default();
+    let mut config = SessionConfig::default();
+    let device_path = app
+        .path()
+        .app_local_data_dir()
+        .map_err(network_error)?
+        .join("connect-device-id");
+    if let Ok(saved) = std::fs::read_to_string(&device_path) {
+        if !saved.is_empty()
+            && saved.len() <= 80
+            && saved
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        {
+            config.device_id = saved;
+        }
+    }
+    if let Some(parent) = device_path.parent() {
+        std::fs::create_dir_all(parent).map_err(network_error)?;
+    }
+    std::fs::write(&device_path, &config.device_id).map_err(network_error)?;
     let vault = keyring::Entry::new("spotisloth-desktop", "spotify-session")
         .map_err(|_| error("STORAGE", "Le coffre Windows est indisponible."))?;
     let local = std::env::var_os("SPOTISLOTH_SESSION_FILE")
@@ -428,22 +466,38 @@ async fn connect_spotify(
         return Err(error("AUTH_REQUIRED", "Connectez-vous à Spotify."));
     };
     let session = Session::new(config, None);
-    let connected =
-        tokio::time::timeout(Duration::from_secs(35), session.connect(credentials, false)).await;
-    if !matches!(connected, Ok(Ok(()))) {
-        session.shutdown();
-        if imported_mode {
-            return get_status(state.clone()).await;
+    let mixer = SoftMixer::open(MixerConfig::default()).map_err(network_error)?;
+    let backend = audio_backend::find(Some("rodio".to_owned()))
+        .ok_or_else(|| error("AUDIO", "Aucune sortie audio n'est disponible."))?;
+    let player = Player::new(
+        PlayerConfig {
+            position_update_interval: Some(Duration::from_secs(1)),
+            ..PlayerConfig::default()
+        },
+        session.clone(),
+        mixer.get_soft_volume(),
+        move || backend(None, AudioFormat::default()),
+    );
+    let runtime = match ConnectRuntime::start(
+        session.clone(),
+        credentials,
+        player.clone(),
+        Arc::new(mixer.clone()),
+        state.client.clone(),
+    )
+    .await
+    {
+        Ok(runtime) => Arc::new(runtime),
+        Err(err) => {
+            session.shutdown();
+            return Err(err.into());
         }
-        return Err(error(
-            "AUTH_REQUIRED",
-            "La connexion native Spotify a échoué. Réessayez de vous connecter.",
-        ));
-    }
+    };
     if !imported_mode {
         let reusable = Credentials { username: Some(session.username()), auth_data: session.auth_data(), auth_type: librespot_protocol::authentication::AuthenticationType::AUTHENTICATION_STORED_SPOTIFY_CREDENTIALS };
         let saved = serde_json::to_string(&reusable).map_err(network_error)?;
         if vault.set_password(&saved).is_err() {
+            runtime.shutdown();
             session.shutdown();
             return Err(error(
                 "STORAGE",
@@ -451,97 +505,30 @@ async fn connect_spotify(
             ));
         }
     }
-    let mixer = SoftMixer::open(MixerConfig::default()).map_err(network_error)?;
-    mixer.set_volume(32768);
-    let backend = audio_backend::find(Some("rodio".to_owned()))
-        .ok_or_else(|| error("AUDIO", "Aucune sortie audio n'est disponible."))?;
-    let player_config = PlayerConfig {
-        position_update_interval: Some(Duration::from_secs(1)),
-        ..PlayerConfig::default()
-    };
-    let player = Player::new(
-        player_config,
-        session.clone(),
-        mixer.get_soft_volume(),
-        move || backend(None, AudioFormat::default()),
-    );
-    let mut events = player.get_player_event_channel();
-    let loads = Arc::new(Mutex::new(PlaybackLoads::default()));
+    let mut updates = runtime.subscribe();
     *state.native.lock().await = Some(Native {
-        session,
+        session: session.clone(),
         player,
-        mixer,
-        loads: loads.clone(),
+        connect: runtime,
     });
     let shared = state.inner().clone();
     tauri::async_runtime::spawn(async move {
-        while let Some(event) = events.recv().await {
-            if let PlayerEvent::PlayRequestIdChanged { play_request_id } = &event {
-                loads.lock().await.changed(*play_request_id);
-                continue;
+        loop {
+            if session.is_invalid() {
+                break;
             }
-            let mut snapshot = shared.playback.lock().await;
-            if let Some(id) = event.get_play_request_id() {
-                if !loads.lock().await.accepts(id, &snapshot.selection) {
-                    continue;
-                }
+            let current = shared.native.lock().await;
+            if current
+                .as_ref()
+                .is_none_or(|n| n.session.device_id() != session.device_id())
+            {
+                break;
             }
-            let event_track = match &event {
-                PlayerEvent::Playing { track_id, .. }
-                | PlayerEvent::Paused { track_id, .. }
-                | PlayerEvent::PositionChanged { track_id, .. }
-                | PlayerEvent::Seeked { track_id, .. }
-                | PlayerEvent::Unavailable { track_id, .. }
-                | PlayerEvent::EndOfTrack { track_id, .. }
-                | PlayerEvent::Stopped { track_id, .. } => Some(track_id),
-                _ => None,
-            };
-            if event_track.is_some_and(|id| {
-                snapshot
-                    .track
-                    .as_ref()
-                    .is_none_or(|track| id.to_uri().ok().as_deref() != Some(track.uri.as_str()))
-            }) {
-                continue;
-            }
-            let ended = matches!(&event, PlayerEvent::EndOfTrack { .. });
-            match event {
-                PlayerEvent::Playing { position_ms, .. } => {
-                    snapshot.playing = true;
-                    snapshot.loading = false;
-                    snapshot.position_ms = position_ms;
-                }
-                PlayerEvent::Paused { position_ms, .. } => {
-                    snapshot.playing = false;
-                    snapshot.position_ms = position_ms;
-                }
-                PlayerEvent::PositionChanged { position_ms, .. }
-                | PlayerEvent::Seeked { position_ms, .. } => {
-                    snapshot.position_ms = position_ms;
-                }
-                PlayerEvent::Unavailable { .. } => {
-                    snapshot.playing = false;
-                    snapshot.loading = false;
-                    snapshot.unavailable = true;
-                }
-                PlayerEvent::EndOfTrack { .. } => {
-                    snapshot.playing = false;
-                    snapshot.loading = false;
-                    snapshot.ended = true;
-                    snapshot.position_ms =
-                        snapshot.track.as_ref().map_or(0, |track| track.duration_ms);
-                }
-                PlayerEvent::Stopped { .. } => {
-                    snapshot.playing = false;
-                    snapshot.loading = false;
-                }
-                _ => continue,
-            }
-            let _ = app.emit("playback", &*snapshot);
-            if ended {
-                let selection = snapshot.selection.clone();
-                drop(snapshot);
-                let _ = app.emit("track-ended", selection);
+            drop(current);
+            let snapshot = updates.borrow_and_update().clone();
+            let _ = app.emit("connect-state", snapshot);
+            if updates.changed().await.is_err() {
+                break;
             }
         }
     });
@@ -551,14 +538,13 @@ async fn connect_spotify(
 #[tauri::command]
 async fn disconnect_spotify(state: State<'_, Arc<Backend>>) -> Result<()> {
     let _connection = state.connection.lock().await;
-    state.selection.fetch_add(1, Ordering::SeqCst);
     if let Some(native) = state.native.lock().await.take() {
+        native.connect.shutdown();
         native.player.stop();
         native.session.shutdown();
     }
     state.imported.lock().await.take();
     state.cache.lock().await.clear();
-    *state.playback.lock().await = Playback::default();
     for service in ["spotisloth-desktop", "fastify-desktop"] {
         if let Ok(entry) = keyring::Entry::new(service, "spotify-session") {
             match entry.delete_credential() {
@@ -1024,88 +1010,31 @@ async fn get_track_details(
 }
 
 #[tauri::command]
-async fn play_track(
-    app: tauri::AppHandle,
-    state: State<'_, Arc<Backend>>,
-    uri: String,
-    selection: String,
-) -> Result<()> {
-    if selection.is_empty() || selection.len() > 80 {
-        return Err(error("INPUT", "Sélection de lecture invalide."));
-    }
-    let id = SpotifyUri::from_uri(&uri).map_err(|_| error("INPUT", "Lien Spotify invalide."))?;
-    if !matches!(id, SpotifyUri::Track { .. }) {
-        return Err(error(
-            "UNAVAILABLE",
-            "La lecture des podcasts n'est pas encore disponible.",
-        ));
-    }
-    let session = state.session().await?;
-    let generation = state.selection.fetch_add(1, Ordering::SeqCst) + 1;
-    let track = tokio::time::timeout(Duration::from_secs(15), async {
-        let _slot = state.metadata.acquire().await.map_err(network_error)?;
-        Track::get(&session, &id).await.map_err(network_error)
-    })
-    .await
-    .map_err(network_error)??;
+async fn get_connect_state(state: State<'_, Arc<Backend>>) -> Result<ConnectView> {
     let native = state.native.lock().await;
-    if state.selection.load(Ordering::SeqCst) != generation {
-        return Ok(());
-    }
-    let native = native
+    let runtime = native
         .as_ref()
-        .ok_or_else(|| error("AUTH_REQUIRED", "Reconnectez-vous à Spotify."))?;
-    let snapshot = Playback {
-        selection: selection.clone(),
-        track: Some(track_view(track)),
-        loading: true,
-        ..Playback::default()
-    };
-    *state.playback.lock().await = snapshot.clone();
-    let _ = app.emit("playback", snapshot);
-    native.loads.lock().await.push(selection);
-    native.player.load(id, true, 0);
-    Ok(())
-}
-
-#[tauri::command]
-async fn player_command(
-    state: State<'_, Arc<Backend>>,
-    command: String,
-    value: Option<u32>,
-    selection: Option<String>,
-) -> Result<()> {
-    let native = state.native.lock().await;
-    let native = native
-        .as_ref()
+        .map(|n| n.connect.clone())
         .ok_or_else(|| error("AUTH_REQUIRED", "Connectez-vous à Spotify."))?;
-    if command != "volume" {
-        if let Some(selection) = &selection {
-            if *selection != state.playback.lock().await.selection {
-                return Ok(());
-            }
-        }
-    }
-    match command.as_str() {
-        "play" => native.player.play(),
-        "pause" => native.player.pause(),
-        "seek" => {
-            let duration = state
-                .playback
-                .lock()
-                .await
-                .track
-                .as_ref()
-                .map(|t| t.duration_ms)
-                .unwrap_or(0);
-            native.player.seek(value.unwrap_or(0).min(duration));
-        }
-        "volume" => native
-            .mixer
-            .set_volume((value.unwrap_or(50).min(100) as f64 * 655.35) as u16),
-        _ => return Err(error("INPUT", "Commande inconnue.")),
-    }
-    Ok(())
+    drop(native);
+    Ok(runtime.view().await)
+}
+#[tauri::command]
+async fn connect_command(
+    state: State<'_, Arc<Backend>>,
+    action: ConnectAction,
+    device_id: Option<String>,
+) -> Result<()> {
+    let native = state.native.lock().await;
+    let runtime = native
+        .as_ref()
+        .map(|n| n.connect.clone())
+        .ok_or_else(|| error("AUTH_REQUIRED", "Connectez-vous à Spotify."))?;
+    drop(native);
+    runtime
+        .execute(action, device_id.as_deref())
+        .await
+        .map_err(Into::into)
 }
 
 pub fn run() {
@@ -1127,14 +1056,15 @@ pub fn run() {
             open_collection,
             get_context_page,
             get_track_details,
-            play_track,
-            player_command
+            get_connect_state,
+            connect_command
         ])
         .on_window_event(|window, event| {
             if matches!(event, tauri::WindowEvent::Destroyed) {
                 let shared = window.state::<Arc<Backend>>().inner().clone();
                 tauri::async_runtime::spawn(async move {
                     if let Some(native) = shared.native.lock().await.take() {
+                        native.connect.shutdown();
                         native.player.stop();
                         native.session.shutdown();
                     }

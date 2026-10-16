@@ -580,6 +580,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "53c0fa8157de1303bfffdaa1cc2a673bfffb60102f76b0ef4441659124373fed"
 
 [[package]]
+name = "futures-macro"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9fb9654ba8355388abeb8dcb4fc62f511300867002afc858860463bdd9fe0c44"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.9",
+]
+
+[[package]]
 name = "futures-sink"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -605,6 +616,7 @@ checksum = "0d50a92467f8ba5dd6e3ee5d4bd04d73ab2e4e1c44474a0674821dfce14b79bc"
 dependencies = [
  "futures-core",
  "futures-io",
+ "futures-macro",
  "futures-sink",
  "futures-task",
  "memchr",
@@ -1173,6 +1185,26 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+]
+
+[[package]]
+name = "librespot-connect"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4b2a21e9e19b906c6676b1a515fc5529d5414f69049f5a167dfb2ea3206e5a27"
+dependencies = [
+ "futures-util",
+ "librespot-core",
+ "librespot-playback",
+ "librespot-protocol",
+ "log",
+ "protobuf",
+ "rand 0.9.5",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-stream",
+ "uuid",
 ]
 
 [[package]]
@@ -2400,13 +2432,16 @@ dependencies = [
 name = "spotify-probe"
 version = "0.1.0"
 dependencies = [
+ "futures-util",
  "keyring",
+ "librespot-connect",
  "librespot-core",
  "librespot-metadata",
  "librespot-playback",
  "librespot-protocol",
  "protobuf",
  "protobuf-codegen",
+ "protobuf-json-mapping",
  "reqwest",
  "serde",
  "serde_json",

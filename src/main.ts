@@ -13,8 +13,16 @@ import {
 import "./style.css";
 import { SavedTracks } from "./lib/saved.ts";
 import { PlaylistDialogs } from "./ui/playlists.ts";
-import { PlaybackQueue, type QueueEntry } from "./lib/queue.ts";
-import { readContext, type ContextPage } from "./lib/context.ts";
+import { PlaybackQueue } from "./lib/queue.ts";
+import {
+  commandDevice,
+  emptyConnectState,
+  nextRepeat,
+  queueAction,
+  type ConnectAction,
+  type ConnectState,
+} from "./lib/connect.ts";
+import { DevicePicker } from "./ui/devices.ts";
 import { QueueView } from "./ui/queue.ts";
 
 type Status = {
@@ -65,9 +73,17 @@ let libraryNext: number | null = null;
 let libraryFilter = "all";
 let libraryLoading = false;
 const queue = new PlaybackQueue<Card>();
-let playSelection = "";
-let lastEndedSelection = "";
-let contextRequest = 0;
+let connectState = emptyConnectState();
+let connectPending = false;
+let connectEpoch = 0;
+const connectQueueKeys = new Map<number, string>();
+const connectMetadata = new Map<string, NativeTrack>();
+const metadataPending = new Set<string>();
+let queueDragSnapshot: {
+  key: string;
+  revision: string;
+  device: string | null;
+} | null = null;
 let queuePreparing = false;
 let queueDragId: number | null = null;
 let collectionTracks: Card[] = [];
@@ -150,6 +166,15 @@ const paths: Record<string, string> = {
   next: '<path d="M19 4v16M5 4l12 8-12 8Z"/>',
   volume:
     '<path d="M3 9h4l5-4v14l-5-4H3Zm13-2a7 7 0 0 1 0 10m3-13a11 11 0 0 1 0 16"/>',
+  computer:
+    '<rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8m-4-4v4"/>',
+  phone:
+    '<rect x="6" y="2" width="12" height="20" rx="2"/><path d="M10 18h4"/>',
+  tablet:
+    '<rect x="4" y="2" width="16" height="20" rx="2"/><path d="M11 18h2"/>',
+  speaker:
+    '<rect x="5" y="2" width="14" height="20" rx="2"/><circle cx="12" cy="14" r="4"/><circle cx="12" cy="6" r="1"/>',
+  tv: '<rect x="2" y="4" width="20" height="14" rx="2"/><path d="M8 22h8m-4-4v4"/>',
   queue: '<path d="M3 5h18M3 11h12M3 17h8m6-2 5 3-5 3Z"/>',
   music:
     '<path d="M9 18V5l11-2v13M9 8l11-2"/><ellipse cx="5.5" cy="18.5" rx="3.5" ry="2.5"/><ellipse cx="16.5" cy="16.5" rx="3.5" ry="2.5"/>',
@@ -192,10 +217,22 @@ byId("app").innerHTML = `
       <button id="next" class="icon-button" aria-label="Titre suivant" disabled>${icon("next")}</button>
       <button id="repeat" class="icon-button mode-button" aria-label="Activer la répétition" aria-pressed="false" disabled>${icon("repeat")}</button>
     </div><div class="timeline"><span id="position">0:00</span><input id="seek" type="range" min="0" max="100" value="0" aria-label="Position de lecture" disabled/><span id="duration">0:00</span></div></div>
-    <div class="player-options"><button id="show-queue" class="icon-button" aria-label="File d’attente">${icon("queue")}</button>${icon("volume")}<input id="volume" type="range" min="0" max="100" value="50" aria-label="Volume" disabled/></div>
+    <div class="player-options"><button id="show-devices" class="icon-button" aria-label="Se connecter à un appareil" title="Se connecter à un appareil" disabled>${icon("computer")}</button><button id="show-queue" class="icon-button" aria-label="File d’attente">${icon("queue")}</button>${icon("volume")}<input id="volume" type="range" min="0" max="100" value="50" aria-label="Volume" disabled/></div>
   </footer>
+  <button id="connect-banner" class="connect-banner" hidden></button>
   <div id="toast" role="status" aria-live="polite" hidden></div>`;
 
+const devicePicker = new DevicePicker(
+  byId<HTMLButtonElement>("show-devices"),
+  connectState,
+  icon,
+  (id) => {
+    void sendConnect({ kind: "transfer", deviceId: id });
+  },
+);
+byId("connect-banner").addEventListener("click", () =>
+  byId("show-devices").click(),
+);
 function showError(value: unknown): void {
   const err = value as AppError;
   const message = err?.message || "Une erreur est survenue. Réessayez.";
@@ -479,20 +516,9 @@ function openTrackMenu(button: HTMLElement): void {
     if (!action) return;
     closeTrackMenu();
     if (action === "add") void playlists.add(uri);
-    if (action === "queue") {
-      queue.enqueue(
-        cards.get(uri) ??
-          queue.upcoming.find((entry) => entry.track.uri === uri)?.track ??
-          (playback.track?.uri === uri
-            ? nativeCard(playback.track)
-            : pendingCard(uri)),
-      );
-      queueChanged();
-    }
-    if (action === "unqueue" && queueId !== null) {
-      queue.remove(queueId);
-      queueChanged();
-    }
+    if (action === "queue") void sendConnect({ kind: "add", uri });
+    if (action === "unqueue" && queueId !== null)
+      void editConnectQueue("remove", queueId, undefined, null);
     if (action === "remove" && snapshot?.data.revision && position !== null)
       void playlists.change(snapshot.card.uri, snapshot.data.revision, {
         kind: "remove",
@@ -627,189 +653,221 @@ async function openCollection(card: Card, offset = 0): Promise<void> {
   }
 }
 
-function pendingCard(uri: string): Card {
-  return {
-    uri,
-    name: "Chargement du titre…",
-    subtitle: "",
-    image: "",
-    kind: "track",
-    durationMs: 0,
-  };
-}
-function queueChanged(): void {
+async function sendConnect(
+  action: ConnectAction,
+  device = commandDevice(connectState),
+): Promise<void> {
+  if (connectPending || !connectState.ready) return;
+  const epoch = connectEpoch;
+  connectPending = true;
   updateControls();
-  queueView.render();
+  try {
+    await invoke("connect_command", { action, deviceId: device });
+  } catch (err) {
+    if (epoch === connectEpoch) showError(err);
+  } finally {
+    if (epoch === connectEpoch) {
+      connectPending = false;
+      queuePreparing = false;
+      updateControls();
+    }
+  }
+}
+async function editConnectQueue(
+  kind: "jump" | "remove" | "move",
+  id: number,
+  to?: number,
+  captured = queueDragSnapshot,
+): Promise<void> {
+  const key = captured?.key ?? connectQueueKeys.get(id);
+  if (!key) return;
+  try {
+    await sendConnect(
+      queueAction(
+        connectState,
+        key,
+        captured?.revision ?? connectState.revision,
+        kind,
+        to,
+      ),
+      captured?.device ?? commandDevice(connectState),
+    );
+  } catch (err) {
+    showError(err);
+  }
 }
 async function startTrack(uri: string, position?: number): Promise<void> {
-  if (!status.nativeReady) return;
+  if (!status.nativeReady || !connectState.ready || connectPending) return;
   if (!/^spotify:track:[A-Za-z0-9]{22}$/.test(uri)) {
     showError({
       message: "Ce type de contenu ne peut pas encore être lu dans Spotisloth.",
     });
     return;
   }
-  const generation = ++contextRequest;
   const collection = activeView === "collection" ? selectedCollection : null;
-  const source =
+  const context =
     collection?.card.uri ?? (activeView === "liked" ? likedCard.uri : null);
-  const known = new Map(
-    [...cards.values(), ...collectionTracks]
-      .filter((card) => card.kind === "track")
-      .map((card) => [card.uri, card]),
-  );
+  const tracks = context
+    ? null
+    : [...cards.values()].filter((c) => c.kind === "track").map((c) => c.uri);
+  const index =
+    collection && Number.isInteger(position)
+      ? position!
+      : tracks
+        ? tracks.indexOf(uri)
+        : null;
   queuePreparing = true;
-  updateControls();
-  try {
-    let tracks: Card[];
-    let selected: number;
-    if (source) {
-      const all = await readContext(
-        (cursor, revision) =>
-          invoke<ContextPage>("get_context_page", {
-            uri: source,
-            cursor,
-            revision,
-          }),
-        () => generation !== contextRequest || !status.nativeReady,
-        collection?.data.revision ?? null,
-      );
-      if (!all) return;
-      const playable = all
-        .map((uri, index) => ({ uri, index }))
-        .filter((item) => /^spotify:track:[A-Za-z0-9]{22}$/.test(item.uri));
-      selected = playable.findIndex(
-        (item) => item.uri === uri && (!collection || item.index === position),
-      );
-      tracks = playable.map(
-        (item) => known.get(item.uri) ?? pendingCard(item.uri),
-      );
-    } else {
-      tracks = [...cards.values()].filter((card) => card.kind === "track");
-      selected = tracks.findIndex((card) => card.uri === uri);
-    }
-    if (generation !== contextRequest) return;
-    if (selected < 0)
-      throw {
-        code: "CONFLICT",
-        message: "La sélection a changé. Rechargez-la avant de la lire.",
-      };
-    const entry = queue.reset(
-      tracks,
-      selected,
-      collection?.data.name ?? (source ? "Titres likés" : "Votre sélection"),
-    );
-    queueView.reset();
-    await playEntry(entry);
-  } catch (error) {
-    if (generation === contextRequest) showError(error);
-  } finally {
-    if (generation === contextRequest) {
-      queuePreparing = false;
-      queueChanged();
-    }
-  }
-}
-async function playEntry(entry: QueueEntry<Card>): Promise<void> {
-  if (!status.nativeReady) {
-    showError({
-      message: "La lecture native nécessite une connexion Spotify valide.",
-    });
-    return;
-  }
-  const previousSelection = playSelection;
-  const selection = crypto.randomUUID();
-  playSelection = selection;
-  playback = {
-    selection,
-    track: {
-      uri: entry.track.uri,
-      name: entry.track.name,
-      artist: entry.track.subtitle,
-      image: entry.track.image,
-      album: "",
-      durationMs: entry.track.durationMs,
-    },
-    playing: false,
-    loading: true,
-    positionMs: 0,
-    unavailable: false,
-    ended: false,
-  };
-  lastPlaybackUpdate = performance.now();
-  renderPlayback();
-  queueChanged();
-  try {
-    await invoke("play_track", { uri: entry.track.uri, selection });
-  } catch (err) {
-    if (playSelection !== selection) return;
-    playback.loading = false;
-    playback.unavailable = true;
-    // Pause a prior selection that may still be audible after metadata failure.
-    void invoke("player_command", {
-      command: "pause",
-      selection: previousSelection,
-      value: null,
-    }).catch(() => {});
-    updateControls();
-    showError(err);
-  }
+  await sendConnect({
+    kind: "play",
+    uri,
+    context,
+    tracks: tracks?.length ? tracks : [uri],
+    index: index !== null && index >= 0 ? index : null,
+    shuffle: queue.shuffle,
+    repeat: queue.repeat,
+  });
 }
 async function command(command: string, value?: number): Promise<void> {
-  try {
-    await invoke("player_command", {
-      command,
-      value,
-      selection: playSelection,
-    });
-  } catch (err) {
-    showError(err);
-  }
+  if (command === "seek" || command === "volume")
+    await sendConnect({ kind: command, value: value ?? 0 });
+  else await sendConnect({ kind: command === "play" ? "resume" : "pause" });
 }
-function step(direction: number, automatic = false): void {
-  if (queuePreparing || !status.nativeReady || (playback.loading && !automatic))
-    return;
-  if (direction < 0 && playback.positionMs > 3000) {
-    if (playback.ended && queue.current) void playEntry(queue.current);
-    else void command("seek", 0);
-    return;
-  }
-  const entry = direction < 0 ? queue.previous() : queue.next(automatic);
-  if (entry) void playEntry(entry);
-  else if (direction < 0 && queue.current) void command("seek", 0);
-  queueChanged();
+function step(direction: number): void {
+  void sendConnect({ kind: direction < 0 ? "previous" : "next" });
 }
 function togglePlayback(): void {
-  if (queuePreparing || playback.loading) return;
-  if (!queue.current) {
-    step(1);
-    return;
+  if (playback.track) void command(playback.playing ? "pause" : "play");
+}
+function applyConnect(next: ConnectState): void {
+  const previous = connectState;
+  connectState = next;
+  const cached = next.track ? connectMetadata.get(next.track.uri) : undefined;
+  const track = next.track ? { ...next.track, ...(cached ?? {}) } : null;
+  const changed =
+    previous.revision !== next.revision || previous.track?.uri !== track?.uri;
+  const metadataChanged =
+    playback.track?.name !== track?.name ||
+    playback.track?.image !== track?.image ||
+    playback.track?.album !== track?.album;
+  playback = {
+    selection: next.revision,
+    track,
+    playing: next.playing,
+    loading: next.loading,
+    positionMs: next.positionMs,
+    ended: false,
+    unavailable: false,
+  };
+  lastPlaybackUpdate = performance.now();
+  if (changed) {
+    const known = new Map(
+      [
+        ...cards.values(),
+        ...(queue.current ? [queue.current.track] : []),
+        ...queue.upcoming.map((e) => e.track),
+      ].map((c) => [c.uri, c]),
+    );
+    queue.clear();
+    connectQueueKeys.clear();
+    queueView.reset();
+    if (track) {
+      queue.reset(
+        [
+          nativeCard(track),
+          ...next.queue.map((t) => known.get(t.uri) ?? nativeCard(t)),
+        ],
+        0,
+        next.contextName,
+      );
+      queue.upcoming.forEach((e, i) =>
+        connectQueueKeys.set(e.id, next.queue[i].key),
+      );
+    }
   }
-  if (playback.ended || playback.unavailable) {
-    void playEntry(queue.current);
-    return;
+  queue.shuffle = next.shuffle;
+  queue.repeat = next.repeat;
+  if (changed || metadataChanged) {
+    renderPlayback();
+    queueView.render();
+  } else updateControls();
+  updatePosition();
+  const active = next.devices.find((d) => d.active);
+  const volume = active?.volume;
+  if (
+    volume !== null &&
+    volume !== undefined &&
+    document.activeElement !== byId("volume")
+  )
+    byId<HTMLInputElement>("volume").value = String(volume);
+  const remote = !!active && !active.local;
+  byId("connect-banner").hidden = !remote;
+  byId("connect-banner").textContent = remote
+    ? "Lecture sur " + active.name
+    : "";
+  document.body.classList.toggle("remote-playback", remote);
+  if (
+    track?.name === "Chargement du titre…" &&
+    !metadataPending.has(track.uri)
+  ) {
+    const epoch = connectEpoch;
+    const uri = track.uri;
+    metadataPending.add(uri);
+    void invoke<NativeTrack[]>("get_track_details", { uris: [uri] })
+      .then((tracks) => {
+        if (epoch !== connectEpoch) return;
+        const detail = tracks[0];
+        if (!detail) return;
+        if (connectMetadata.size >= 200) connectMetadata.clear();
+        connectMetadata.set(uri, detail);
+        if (playback.track?.uri === uri) {
+          playback.track = detail;
+          queue.updateTrack(uri, nativeCard(detail));
+          renderPlayback();
+          queueView.render();
+        }
+      })
+      .catch((err) => {
+        if (epoch === connectEpoch) showError(err);
+      })
+      .finally(() => {
+        if (epoch === connectEpoch) metadataPending.delete(uri);
+      });
   }
-  void command(playback.playing ? "pause" : "play");
 }
 function updateControls(): void {
-  const hasTrack = !!playback.track && status.nativeReady;
+  const ready = status.nativeReady && connectState.ready && !connectPending;
+  const hasTrack = !!playback.track && ready;
+  devicePicker.update(connectState, connectPending);
   const toggle = byId<HTMLButtonElement>("toggle-play");
   toggle.disabled =
-    !status.nativeReady ||
+    !hasTrack ||
     queuePreparing ||
     playback.loading ||
-    (!hasTrack && !queue.hasNext);
+    (playback.playing
+      ? connectState.restrictions.pause
+      : connectState.restrictions.resume);
   toggle.innerHTML = icon(playback.playing ? "pause" : "play");
   toggle.classList.toggle("is-loading", queuePreparing || playback.loading);
   toggle.setAttribute("aria-label", playback.playing ? "Pause" : "Lire");
-  byId<HTMLInputElement>("seek").disabled = !hasTrack || playback.loading;
-  byId<HTMLInputElement>("volume").disabled = !status.nativeReady;
+  byId<HTMLInputElement>("seek").disabled =
+    !hasTrack || playback.loading || connectState.restrictions.seek;
+  byId<HTMLInputElement>("volume").disabled =
+    !ready ||
+    !connectState.activeDeviceId ||
+    connectState.devices.find((d) => d.active)?.volume === null;
   byId<HTMLButtonElement>("previous").disabled =
-    !hasTrack || playback.loading || queuePreparing;
+    !hasTrack ||
+    playback.loading ||
+    queuePreparing ||
+    connectState.restrictions.previous;
   byId<HTMLButtonElement>("next").disabled =
-    !status.nativeReady || playback.loading || queuePreparing || !queue.hasNext;
+    !hasTrack ||
+    playback.loading ||
+    queuePreparing ||
+    connectState.restrictions.next;
   const shuffle = byId<HTMLButtonElement>("shuffle");
-  shuffle.disabled = !status.nativeReady || queuePreparing;
+  shuffle.disabled =
+    !ready || queuePreparing || connectState.restrictions.shuffle;
   shuffle.setAttribute("aria-pressed", String(queue.shuffle));
   shuffle.classList.toggle("active", queue.shuffle);
   shuffle.setAttribute(
@@ -819,7 +877,8 @@ function updateControls(): void {
       : "Activer la lecture aléatoire",
   );
   const repeat = byId<HTMLButtonElement>("repeat");
-  repeat.disabled = !status.nativeReady || queuePreparing;
+  repeat.disabled =
+    !ready || queuePreparing || connectState.restrictions.repeat;
   repeat.setAttribute("aria-pressed", String(queue.repeat !== "off"));
   repeat.classList.toggle("active", queue.repeat !== "off");
   repeat.setAttribute(
@@ -874,6 +933,8 @@ async function connect(interactive: boolean): Promise<void> {
   try {
     status = await invoke<Status>("connect_spotify", { interactive });
     renderAccount();
+    if (!connectState.available)
+      applyConnect(await invoke<ConnectState>("get_connect_state"));
     updateControls();
     await loadHome();
     if (status.nativeReady) void loadLibrary();
@@ -933,8 +994,15 @@ document.addEventListener("click", async (event) => {
   }
   if (id === "connect" || id === "welcome-connect") void connect(true);
   if (id === "disconnect") {
-    ++contextRequest;
-    playSelection = "";
+    ++connectEpoch;
+    connectState = emptyConnectState();
+    connectMetadata.clear();
+    metadataPending.clear();
+    connectQueueKeys.clear();
+    connectPending = false;
+    devicePicker.close();
+    byId("connect-banner").hidden = true;
+    document.body.classList.remove("remote-playback");
     playlists.close();
     selectedCollection = null;
     savedTracks.clear();
@@ -995,8 +1063,12 @@ document.addEventListener("click", async (event) => {
     void startTrack(button.dataset.play, Number(button.dataset.playPosition));
   }
   if (button.dataset.queuePlay && !queuePreparing && !playback.loading) {
-    const entry = queue.jump(Number(button.dataset.queuePlay));
-    if (entry) void playEntry(entry);
+    void editConnectQueue(
+      "jump",
+      Number(button.dataset.queuePlay),
+      undefined,
+      null,
+    );
   }
   if (button.dataset.queueCurrent) togglePlayback();
   if (id === "queue-more") queueView.more();
@@ -1011,12 +1083,20 @@ document.addEventListener("click", async (event) => {
     void loadLibrary(libraryNext);
   if (id === "toggle-play") togglePlayback();
   if (id === "shuffle") {
-    queue.setShuffle(!queue.shuffle);
-    queueChanged();
+    if (connectState.activeDeviceId)
+      void sendConnect({ kind: "shuffle", value: !queue.shuffle });
+    else {
+      queue.setShuffle(!queue.shuffle);
+      updateControls();
+    }
   }
   if (id === "repeat") {
-    queue.cycleRepeat();
-    queueChanged();
+    if (connectState.activeDeviceId)
+      void sendConnect({ kind: "repeat", value: nextRepeat(queue.repeat) });
+    else {
+      queue.cycleRepeat();
+      updateControls();
+    }
   }
   if (id === "previous") step(-1);
   if (id === "next") step(1);
@@ -1057,8 +1137,12 @@ document.addEventListener("keydown", (event) => {
       event.preventDefault();
       const id = Number(queued.dataset.queueId);
       const position = queue.upcoming.findIndex((entry) => entry.id === id);
-      queue.move(id, position + (event.key === "ArrowUp" ? -1 : 1));
-      queueChanged();
+      void editConnectQueue(
+        "move",
+        id,
+        position + (event.key === "ArrowUp" ? -1 : 1),
+        null,
+      );
       return;
     }
     const row = target.closest<HTMLElement>(".track-row[data-position]");
@@ -1092,6 +1176,14 @@ document.addEventListener("dragstart", (event) => {
   );
   if (queued) {
     queueDragId = Number(queued.dataset.queueId);
+    const key = connectQueueKeys.get(queueDragId);
+    queueDragSnapshot = key
+      ? {
+          key,
+          revision: connectState.revision,
+          device: commandDevice(connectState),
+        }
+      : null;
     event.dataTransfer?.setData("text/plain", `queue:${queueDragId}`);
     if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
     queued.classList.add("dragging");
@@ -1147,14 +1239,15 @@ document.addEventListener("drop", (event) => {
   );
   if (queued && queueDragId !== null) {
     event.preventDefault();
-    queue.move(
+    void editConnectQueue(
+      "move",
       queueDragId,
       queue.upcoming.findIndex(
         (entry) => entry.id === Number(queued.dataset.queueId),
       ),
     );
     queueDragId = null;
-    queueChanged();
+    queueDragSnapshot = null;
     return;
   }
   const row = (event.target as HTMLElement).closest<HTMLElement>(
@@ -1177,6 +1270,7 @@ document.addEventListener("drop", (event) => {
 });
 document.addEventListener("dragend", () => {
   queueDragId = null;
+  queueDragSnapshot = null;
   drag = null;
   document
     .querySelectorAll(".dragging, .drop-target")
@@ -1208,37 +1302,8 @@ async function boot(): Promise<void> {
   welcome();
   renderLibrary();
   if (!isTauri()) return;
-  await listen<Playback>("playback", (event) => {
-    if (event.payload.selection !== playSelection) return;
-    const previous = playback.track;
-    playback = event.payload;
-    lastPlaybackUpdate = performance.now();
-    if (
-      previous?.uri !== playback.track?.uri ||
-      previous?.name !== playback.track?.name ||
-      previous?.album !== playback.track?.album ||
-      previous?.image !== playback.track?.image ||
-      previous?.artist !== playback.track?.artist ||
-      previous?.durationMs !== playback.track?.durationMs
-    ) {
-      if (playback.track)
-        queue.updateTrack(playback.track.uri, nativeCard(playback.track));
-      renderPlayback();
-      queueView.render();
-    } else updateControls();
-    updatePosition();
-    if (playback.unavailable)
-      showError({ message: "Ce titre ne peut pas être lu actuellement." });
-  });
-  await listen<string>("track-ended", (event) => {
-    if (
-      event.payload !== playSelection ||
-      event.payload === lastEndedSelection ||
-      queuePreparing
-    )
-      return;
-    lastEndedSelection = event.payload;
-    step(1, true);
+  await listen<ConnectState>("connect-state", (event) => {
+    if (event.payload.available) applyConnect(event.payload);
   });
   await connect(false);
 }
