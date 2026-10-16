@@ -800,7 +800,7 @@ function updateControls(): void {
     playback.loading ||
     (!hasTrack && !queue.hasNext);
   toggle.innerHTML = icon(playback.playing ? "pause" : "play");
-  toggle.classList.toggle("loading", queuePreparing || playback.loading);
+  toggle.classList.toggle("is-loading", queuePreparing || playback.loading);
   toggle.setAttribute("aria-label", playback.playing ? "Pause" : "Lire");
   byId<HTMLInputElement>("seek").disabled = !hasTrack || playback.loading;
   byId<HTMLInputElement>("volume").disabled = !status.nativeReady;

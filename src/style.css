@@ -715,13 +715,13 @@ h2 {
   transform: scale(1.07);
   color: #000;
 }
-.play-button.loading {
+.play-button.is-loading {
   position: relative;
 }
-.play-button.loading .icon {
+.play-button.is-loading .icon {
   opacity: 0;
 }
-.play-button.loading::after {
+.play-button.is-loading::after {
   content: "";
   position: absolute;
   width: 18px;
