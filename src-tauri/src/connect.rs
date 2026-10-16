@@ -447,6 +447,23 @@ impl ConnectRuntime {
     pub async fn view(&self) -> ConnectView {
         self.model.lock().await.view()
     }
+    /// Local development counters only. Never exposed through the application's IPC.
+    pub async fn queue_diagnostics(&self) -> Value {
+        let model = self.model.lock().await;
+        let Some(cluster) = &model.cluster else {
+            return json!({"ready":false});
+        };
+        let tracks = &cluster.player_state.next_tracks;
+        json!({
+            "queue_count":tracks.len(),
+            "invalid_tracks":tracks.iter().filter(|t| validate_track(&t.uri).is_err()).count(),
+            "samples":tracks.iter().take(4).map(|t| {
+                let mut keys=t.metadata.keys().cloned().collect::<Vec<_>>();
+                keys.sort();
+                json!({"uri_length":t.uri.len(),"valid_track":validate_track(&t.uri).is_ok(),"has_uid":!t.uid.is_empty(),"metadata_keys":keys,"removed_fields":t.removed,"unknown_fields":t.special_fields.unknown_fields().iter().map(|(number,_)|number).collect::<Vec<_>>()})
+            }).collect::<Vec<_>>()
+        })
+    }
     pub fn shutdown(&self) {
         let _ = self.spirc.shutdown();
     }

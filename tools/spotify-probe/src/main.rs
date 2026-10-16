@@ -56,7 +56,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         )
     };
     let session = Session::new(SessionConfig::default(), None);
-    if std::env::args().any(|arg| arg == "--connect") {
+    if std::env::args().any(|arg| arg.starts_with("--connect")) {
         return diagnose_connect(session, credentials).await;
     }
     tokio::time::timeout(Duration::from_secs(30), session.connect(credentials, false)).await??;
@@ -163,6 +163,7 @@ async fn diagnose_connect(
     })
     .await;
     let view = runtime.view().await;
+    println!("CONNECT_QUEUE_SHAPE: {}", runtime.queue_diagnostics().await);
     if result.is_err() {
         println!(
             "CONNECT_NO_REMOTE: ready={} devices={} active={}",
@@ -171,10 +172,141 @@ async fn diagnose_connect(
             !view.active_device_id.is_empty()
         );
     }
+    let actions = if result.is_ok() {
+        diagnose_connect_actions(&runtime).await
+    } else {
+        Ok(())
+    };
+    if let Err(reason) = &actions {
+        // These errors are built above from static messages and the sanitized ConnectError enum.
+        println!("CONNECT_ACTION_FAILED: {reason}");
+    }
     runtime.shutdown();
     tokio::time::sleep(Duration::from_millis(400)).await;
     session.shutdown();
     result.map_err(|_| "Connect device updates were not confirmed")??;
+    actions?;
+    Ok(())
+}
+
+async fn wait_connect(
+    runtime: &connect::ConnectRuntime,
+    predicate: impl Fn(&connect::ConnectView) -> bool,
+) -> Result<connect::ConnectView, Box<dyn std::error::Error>> {
+    let mut updates = runtime.subscribe();
+    Ok(tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let view = runtime.view().await;
+            if predicate(&view) {
+                return Ok::<_, &'static str>(view);
+            }
+            updates
+                .changed()
+                .await
+                .map_err(|_| "Connect stream closed")?;
+        }
+    })
+    .await
+    .map_err(|_| "Connect state confirmation timed out")??)
+}
+
+async fn diagnose_connect_actions(
+    runtime: &connect::ConnectRuntime,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use connect::ConnectAction;
+    if std::env::args().any(|a| a == "--connect-transfer-roundtrip") {
+        let initial = runtime.view().await;
+        if initial.active_device_id.is_empty() || initial.track.is_none() {
+            return Err("An active playback is required".into());
+        }
+        runtime
+            .execute(
+                ConnectAction::Transfer {
+                    device_id: initial.local_device_id.clone(),
+                },
+                Some(&initial.active_device_id),
+            )
+            .await
+            .map_err(|e| format!("Connect transfer in: {e:?}"))?;
+        println!("CONNECT_TRANSFER_IN_OK");
+        let local = runtime.view().await;
+        runtime
+            .execute(
+                ConnectAction::Transfer {
+                    device_id: initial.active_device_id.clone(),
+                },
+                Some(&local.active_device_id),
+            )
+            .await
+            .map_err(|e| format!("Connect transfer out: {e:?}"))?;
+        println!("CONNECT_TRANSFER_OUT_OK");
+    }
+    if std::env::args().any(|a| a == "--connect-queue-roundtrip") {
+        let initial = runtime.view().await;
+        let uri = initial
+            .track
+            .as_ref()
+            .ok_or("An active track is required")?
+            .uri
+            .clone();
+        let before = initial.queue.iter().filter(|t| t.track.uri == uri).count();
+        let uids = initial
+            .queue
+            .iter()
+            .map(|t| {
+                t.key
+                    .split_once(':')
+                    .map(|(_, uid)| uid)
+                    .unwrap_or("")
+                    .to_owned()
+            })
+            .collect::<std::collections::HashSet<_>>();
+        runtime
+            .execute(
+                ConnectAction::Add { uri: uri.clone() },
+                Some(&initial.active_device_id),
+            )
+            .await
+            .map_err(|e| format!("Connect queue add: {e:?}"))?;
+        let changed = wait_connect(runtime, |v| {
+            v.queue.iter().filter(|t| t.track.uri == uri).count() == before + 1
+        })
+        .await;
+        println!(
+            "CONNECT_QUEUE_SHAPE_AFTER: {}",
+            runtime.queue_diagnostics().await
+        );
+        let changed = changed?;
+        println!("CONNECT_QUEUE_ADD_OK");
+        let candidates = changed
+            .queue
+            .iter()
+            .filter(|t| {
+                t.track.uri == uri
+                    && t.key
+                        .split_once(':')
+                        .is_some_and(|(_, uid)| !uid.is_empty() && !uids.contains(uid))
+            })
+            .collect::<Vec<_>>();
+        if candidates.len() != 1 {
+            return Err("New queue occurrence could not be identified safely".into());
+        }
+        runtime
+            .execute(
+                ConnectAction::Remove {
+                    key: candidates[0].key.clone(),
+                    revision: changed.revision.clone(),
+                },
+                Some(&changed.active_device_id),
+            )
+            .await
+            .map_err(|e| format!("Connect queue cleanup: {e:?}"))?;
+        wait_connect(runtime, |v| {
+            v.queue.iter().filter(|t| t.track.uri == uri).count() == before
+        })
+        .await?;
+        println!("CONNECT_QUEUE_REMOVE_OK");
+    }
     Ok(())
 }
 

@@ -41,6 +41,14 @@ Il ne lance aucun morceau et ne transfère pas la lecture. Il affiche seulement
 des compteurs (`CONNECT_DEVICES_OK`) ; il ferme sa session à la fin. Les transferts
 et commandes du lecteur doivent aussi être vérifiés dans l’exécutable Tauri.
 
+`--connect-transfer-roundtrip` transfère la lecture active vers le récepteur de
+diagnostic, puis vers l’appareil d’origine. `--connect-queue-roundtrip` ajoute le
+titre courant et retire uniquement la nouvelle occurrence identifiée par son UID.
+Ces deux modes modifient réellement la lecture ; les exécuter séparément avec le
+lecteur en pause et fermer Spotisloth auparavant. Les réponses affichées décrivent
+les compteurs, les types et les noms des champs ; elles ne contiennent ni URI,
+nom d’appareil, identifiant du compte, ni jeton.
+
 ## Ressources
 
 Voir le [protocole de mesure](../docs/PERFORMANCE.md) pour `Measure-Client.ps1`.
