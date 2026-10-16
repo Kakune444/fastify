@@ -51,6 +51,11 @@ lecteur en pause et fermer Spotisloth auparavant. Les réponses affichées décr
 les compteurs, les types et les noms des champs ; elles ne contiennent ni URI,
 nom d’appareil, identifiant du compte, ni jeton.
 
+`--connect-volume-roundtrip` vérifie un changement de volume avec le lecteur en
+pause, puis remet le niveau initial. `SPOTISLOTH_CONNECT_TRACE=1` affiche uniquement
+le type d’opération, la méthode HTTP et le code de réponse. Le volume utilise PUT,
+conformément à la [correction du client spogo](https://github.com/openclaw/spogo/pull/24/files).
+
 Après un diagnostic interrompu seulement, `--connect-cleanup-test-prefix=N` peut
 retirer de une à trois occurrences de test en tête. Vérifier auparavant que ces
 occurrences ont bien été créées par le test. La sonde refuse un autre titre ou un

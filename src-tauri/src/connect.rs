@@ -478,7 +478,7 @@ impl ConnectRuntime {
     pub fn shutdown(&self) {
         let _ = self.spirc.shutdown();
     }
-    async fn send(&self, path: &str, body: Option<Value>) -> Result<()> {
+    async fn send(&self, method: Method, path: &str, body: Option<Value>) -> Result<()> {
         let auth =
             tokio::time::timeout(Duration::from_secs(15), self.session.login5().auth_token())
                 .await
@@ -498,7 +498,7 @@ impl ConnectRuntime {
             .map_err(|_| ConnectError::Network)?;
         let mut request = self
             .client
-            .request(Method::POST, format!("{base}{path}"))
+            .request(method.clone(), format!("{base}{path}"))
             .bearer_auth(auth.access_token)
             .header("client-token", token);
         if let Some(body) = body {
@@ -506,6 +506,19 @@ impl ConnectRuntime {
         }
         // Writes are submitted once. A lost acknowledgement must not duplicate next/add/transfer.
         let response = request.send().await.map_err(|_| ConnectError::Uncertain)?;
+        if std::env::var("SPOTISLOTH_CONNECT_TRACE").as_deref() == Ok("1") {
+            let operation = if path.contains("/volume/") {
+                "volume"
+            } else if path.contains("/transfer/") {
+                "transfer"
+            } else {
+                "player"
+            };
+            eprintln!(
+                "CONNECT_HTTP: operation={operation} method={method} status={}",
+                response.status().as_u16()
+            );
+        }
         match response.status().as_u16() {
             200..=299 => Ok(()),
             401 => Err(ConnectError::Auth),
@@ -527,8 +540,8 @@ impl ConnectRuntime {
         }
     }
     async fn remote(&self, target: &str, mut command: Value) -> Result<()> {
-        command["logging_params"] = json!({});
-        self.send(&format!("/connect-state/v1/player/command/from/{}/to/{target}",self.session.device_id()), Some(json!({ "command":command, "message_id":self.message_id.fetch_add(1,Ordering::Relaxed), "sent_by_device_id":self.session.device_id() }))).await
+        command["logging_params"] = json!({"command_id":uuid::Uuid::new_v4().simple().to_string()});
+        self.send(Method::POST,&format!("/connect-state/v1/player/command/from/{}/to/{target}",self.session.device_id()), Some(json!({ "command":command, "message_id":self.message_id.fetch_add(1,Ordering::Relaxed), "sent_by_device_id":self.session.device_id() }))).await
     }
     pub async fn execute(
         &self,
@@ -572,8 +585,9 @@ impl ConnectRuntime {
                 }
                 drop(m);
                 self.send(
+                    Method::POST,
                     &format!("/connect-state/v1/connect/transfer/from/{local}/to/{device_id}"),
-                    Some(json!({"transfer_options":{
+                    Some(json!({"command_id":uuid::Uuid::new_v4().simple().to_string(),"transfer_options":{
                         "restore_paused":"restore",
                         "restore_position":if view.playing {"extrapolate"} else {"last_known"},
                         "restore_track":"always_play_something",
@@ -745,6 +759,7 @@ impl ConnectRuntime {
                         .map_err(|_| ConnectError::Network);
                 }
                 self.send(
+                    Method::PUT,
                     &format!("/connect-state/v1/connect/volume/from/{local}/to/{target}"),
                     Some(json!({"volume":volume})),
                 )

@@ -214,6 +214,43 @@ async fn diagnose_connect_actions(
     runtime: &connect::ConnectRuntime,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use connect::ConnectAction;
+    if std::env::args().any(|a| a == "--connect-volume-roundtrip") {
+        let initial = runtime.view().await;
+        if initial.playing {
+            return Err("Pause playback before the volume diagnostic".into());
+        }
+        let original = initial
+            .devices
+            .iter()
+            .find(|d| d.active)
+            .and_then(|d| d.volume)
+            .ok_or("Active device volume unavailable")?;
+        let value = if original == 20 { 16 } else { 20 };
+        runtime
+            .execute(
+                ConnectAction::Volume { value },
+                Some(&initial.active_device_id),
+            )
+            .await
+            .map_err(|e| format!("Connect volume: {e:?}"))?;
+        let applied = wait_connect(runtime, |v| {
+            v.devices.iter().find(|d| d.active).and_then(|d| d.volume) == Some(value)
+        })
+        .await;
+        let restore = runtime
+            .execute(
+                ConnectAction::Volume { value: original },
+                Some(&initial.active_device_id),
+            )
+            .await;
+        applied?;
+        restore.map_err(|e| format!("Connect volume restore: {e:?}"))?;
+        wait_connect(runtime, |v| {
+            v.devices.iter().find(|d| d.active).and_then(|d| d.volume) == Some(original)
+        })
+        .await?;
+        println!("CONNECT_VOLUME_OK: original_level_restored");
+    }
     if std::env::args().any(|a| a == "--connect-transfer-roundtrip") {
         let initial = runtime.view().await;
         if initial.active_device_id.is_empty() || initial.track.is_none() {
@@ -337,9 +374,10 @@ async fn diagnose_connect_actions(
         }
         let initial = runtime.view().await;
         let uri = initial
+            .queue
+            .first()
+            .ok_or("A previously verified test prefix is required")?
             .track
-            .as_ref()
-            .ok_or("An active track is required")?
             .uri
             .clone();
         if initial.queue.len() < count

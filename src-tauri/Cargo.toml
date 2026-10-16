@@ -29,6 +29,7 @@ librespot-oauth = { version = "=0.8.0", default-features = false, features = ["n
 keyring = { version = "3", features = ["windows-native"] }
 protobuf = "3.7"
 futures-util = "0.3"
+uuid = { version = "1", features = ["v4"] }
 
 [profile.release]
 strip = true
