@@ -267,9 +267,8 @@ impl ConnectModel {
             .next_tracks
             .iter()
             .enumerate()
-            .filter(|(_, t)| {
-                t.uri != "spotify:delimiter" && t.metadata.get("hidden").is_none_or(|v| v != "true")
-            })
+            .take_while(|(_, t)| t.uri != "spotify:delimiter")
+            .filter(|(_, t)| t.metadata.get("hidden").is_none_or(|v| v != "true"))
             .map(|(i, t)| QueueTrack {
                 key: format!("{i}:{}", t.uid),
                 queued: t.provider == "queue"
@@ -488,7 +487,7 @@ impl ConnectRuntime {
         let tracks = &cluster.player_state.next_tracks;
         json!({
             "queue_count":tracks.len(),
-            "invalid_tracks":tracks.iter().filter(|t| validate_track(&t.uri).is_err()).count(),
+            "non_track_entries":tracks.iter().filter(|t| validate_track(&t.uri).is_err()).count(),
             "samples":tracks.iter().take(4).map(|t| {
                 let mut keys=t.metadata.keys().cloned().collect::<Vec<_>>();
                 keys.sort();
@@ -1093,13 +1092,14 @@ mod tests {
     }
 
     #[test]
-    fn hidden_context_delimiters_are_preserved_but_never_displayed_as_tracks() {
+    fn hidden_tracks_keep_the_original_queue_positions_for_edits() {
         let mut m = ConnectModel::new("local".into());
         let mut c = cluster(1);
         let p = c.player_state.as_mut().unwrap();
         let mut delimiter = ProvidedTrack::new();
-        delimiter.uri = "spotify:delimiter".into();
-        delimiter.uid = "delimiter0".into();
+        delimiter.uri = p.next_tracks[0].uri.clone();
+        delimiter.uid = "hidden".into();
+        delimiter.metadata.insert("hidden".into(), "true".into());
         p.next_tracks.insert(1, delimiter);
         p.next_tracks[0].provider = "queue".into();
         m.apply(c);
@@ -1114,6 +1114,28 @@ mod tests {
             m.cluster.as_ref().unwrap().player_state.next_tracks.len(),
             3
         );
+    }
+
+    #[test]
+    fn future_repeat_iterations_are_kept_by_the_engine_and_not_duplicated_in_the_visible_queue() {
+        let mut m = ConnectModel::new("local".into());
+        let mut c = cluster(1);
+        let p = c.player_state.as_mut().unwrap();
+        let mut delimiter = ProvidedTrack::new();
+        delimiter.uri = "spotify:delimiter".into();
+        delimiter.uid = "delimiter0".into();
+        p.next_tracks.insert(1, delimiter);
+        p.options = MessageField::some(librespot_protocol::player::ContextPlayerOptions {
+            repeating_context: true,
+            ..Default::default()
+        });
+        m.apply(c);
+        assert_eq!(m.view().queue.len(), 1);
+        assert_eq!(
+            m.cluster.as_ref().unwrap().player_state.next_tracks.len(),
+            3
+        );
+        assert_eq!(m.view().repeat, "all");
     }
 
     #[test]
