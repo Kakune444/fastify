@@ -251,14 +251,16 @@ async fn diagnose_connect_actions(
         .await?;
         println!("CONNECT_VOLUME_OK: original_level_restored");
     }
-    if std::env::args().any(|a| a == "--connect-transfer-roundtrip") {
+    let live_transfer = std::env::args().any(|a| a == "--connect-transfer-playing-roundtrip");
+    if live_transfer || std::env::args().any(|a| a == "--connect-transfer-roundtrip") {
         let initial = runtime.view().await;
         if initial.active_device_id.is_empty() || initial.track.is_none() {
             return Err("An active playback is required".into());
         }
-        if initial.playing {
+        if initial.playing && !live_transfer {
             return Err("Pause playback before the transfer diagnostic".into());
         }
+        let started = std::time::Instant::now();
         runtime
             .execute(
                 ConnectAction::Transfer {
@@ -270,19 +272,34 @@ async fn diagnose_connect_actions(
             .map_err(|e| format!("Connect transfer in: {e:?}"))?;
         let matches_original = |v: &connect::ConnectView| {
             v.track.as_ref().map(|t| &t.uri) == initial.track.as_ref().map(|t| &t.uri)
-                && !v.playing
+                && v.playing == initial.playing
                 && !v.loading
-                && v.position_ms.abs_diff(initial.position_ms) <= 1000
+                && v.position_ms
+                    .abs_diff(initial.position_ms.saturating_add(if initial.playing {
+                        started.elapsed().as_millis().min(u32::MAX as u128) as u32
+                    } else {
+                        0
+                    }))
+                    <= 2000
         };
         let inbound = wait_connect(runtime, |v| {
             v.active_device_id == initial.local_device_id && matches_original(v)
         })
         .await;
         if inbound.is_ok() {
-            println!("CONNECT_TRANSFER_IN_OK: position_and_pause_preserved");
+            println!("CONNECT_TRANSFER_IN_OK: position_and_playback_state_preserved");
         }
         let local = runtime.view().await;
-        println!("CONNECT_TRANSFER_SOURCE_READY: queue={}", local.queue.len());
+        let prefix = initial
+            .queue
+            .iter()
+            .zip(&local.queue)
+            .take(5)
+            .all(|(a, b)| a.track.uri == b.track.uri);
+        println!(
+            "CONNECT_TRANSFER_SOURCE_READY: queue={} prefix_matches={prefix}",
+            local.queue.len()
+        );
         runtime
             .execute(
                 ConnectAction::Transfer {
@@ -297,7 +314,7 @@ async fn diagnose_connect_actions(
             v.active_device_id == initial.active_device_id && matches_original(v)
         })
         .await?;
-        println!("CONNECT_TRANSFER_RESTORE_OK: position_and_pause_preserved");
+        println!("CONNECT_TRANSFER_RESTORE_OK: position_and_playback_state_preserved");
         inbound?;
     }
     if std::env::args().any(|a| a == "--connect-queue-roundtrip") {

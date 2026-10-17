@@ -957,6 +957,8 @@ impl SpircTask {
                 && cluster.active_device_id != self.session.device_id();
             if became_inactive {
                 info!("device became inactive");
+                // Ownership has already moved: do not reclaim it in the final state write.
+                self.connect_state.set_active(false);
                 self.handle_disconnect().await?;
                 self.handle_stop();
             } else if self.connect_state.is_active() {

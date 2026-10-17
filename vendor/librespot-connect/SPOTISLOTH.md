@@ -8,7 +8,10 @@ License: MIT; the upstream license is included in this directory.
 sender. It publishes the cluster already returned by device registration, then
 the clusters already received by the dealer and returned by normal state writes.
 `Spirc::new` remains compatible.
-There are no extra network requests and no changes to playback or authentication.
+When a cluster transfers ownership away from this receiver, the patch marks it
+inactive before the existing disconnect state write. Otherwise that final write
+advertises the old receiver as active again and can undo the remote handoff.
+There are no extra network requests or changes to authentication.
 
 The application and diagnostic probe use the same patched crate. When upgrading
 librespot, reapply or replace this small integration patch and verify registration,

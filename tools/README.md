@@ -51,6 +51,11 @@ lecteur en pause et fermer Spotisloth auparavant. Les réponses affichées décr
 les compteurs, les types et les noms des champs ; elles ne contiennent ni URI,
 nom d’appareil, identifiant du compte, ni jeton.
 
+`--connect-transfer-playing-roundtrip` accepte aussi une lecture en cours et vérifie
+sa continuité à la position attendue après l’aller-retour. Il peut interrompre
+brièvement le son pendant le changement d’appareil. Le préfixe de file est comparé
+sans afficher les URI.
+
 `--connect-volume-roundtrip` vérifie un changement de volume avec le lecteur en
 pause, puis remet le niveau initial. `SPOTISLOTH_CONNECT_TRACE=1` affiche uniquement
 le type d’opération, la méthode HTTP et le code de réponse. Le volume utilise PUT,
