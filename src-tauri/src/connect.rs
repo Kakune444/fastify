@@ -104,9 +104,6 @@ fn transfer_ready(current: &ConnectView, previous: &ConnectView, destination: &s
     if current.active_device_id != destination {
         return false;
     }
-    if destination != current.local_device_id {
-        return true;
-    }
     // Ownership arrives before librespot finishes resolving the transferred context.
     // A paused receiver also sets the buffering bit after it has finished loading.
     if let Some(track) = &previous.track {
@@ -117,6 +114,9 @@ fn transfer_ready(current: &ConnectView, previous: &ConnectView, destination: &s
         {
             return false;
         }
+    }
+    if destination != current.local_device_id {
+        return true;
     }
     current.queue.len() >= previous.queue.len().min(2)
 }
@@ -605,21 +605,96 @@ impl ConnectRuntime {
                     return Ok(());
                 }
                 drop(m);
+                let started = Instant::now();
                 self.send(
                     Method::POST,
                     &format!("/connect-state/v1/connect/transfer/from/{local}/to/{device_id}"),
-                    Some(json!({"command_id":uuid::Uuid::new_v4().simple().to_string(),"transfer_options":{
-                        "restore_paused":"restore",
-                        "restore_position":if view.playing {"extrapolate"} else {"last_known"},
-                        "restore_track":"always_play_something",
-                        "retain_session":"do_not_retain"
-                    }})),
+                    Some(json!({"command_id":uuid::Uuid::new_v4().simple().to_string(),"transfer_options":{}})),
                 )
                 .await?;
                 let mut updates = self.subscribe();
-                return tokio::time::timeout(Duration::from_secs(12), async {
+                tokio::time::timeout(Duration::from_secs(12), async {
                     loop {
                         if transfer_ready(&self.view().await, &view, &device_id) {
+                            return Ok(());
+                        }
+                        updates
+                            .changed()
+                            .await
+                            .map_err(|_| ConnectError::Uncertain)?;
+                    }
+                })
+                .await
+                .map_err(|_| ConnectError::Uncertain)??;
+                // Some receivers restart the same track at zero or resume a paused
+                // handoff. Restore explicit controls only after ownership and track
+                // identity have been confirmed. Never retry the transfer itself.
+                let received = self.view().await;
+                let receiving_here = device_id == local;
+                if !view.playing && (received.playing || received.loading) {
+                    if receiving_here {
+                        self.spirc.pause().map_err(|_| ConnectError::Network)?;
+                    } else {
+                        self.remote(&device_id, json!({"endpoint":"pause"})).await?;
+                    }
+                } else if view.playing && !received.playing && !received.loading {
+                    if receiving_here {
+                        self.spirc.play().map_err(|_| ConnectError::Network)?;
+                    } else {
+                        self.remote(&device_id, json!({"endpoint":"resume"}))
+                            .await?;
+                    }
+                }
+                let Some(original_track) = &view.track else {
+                    return Ok(());
+                };
+                let expected_position = || {
+                    view.position_ms
+                        .saturating_add(if view.playing {
+                            started.elapsed().as_millis().min(u32::MAX as u128) as u32
+                        } else {
+                            0
+                        })
+                        .min(original_track.duration_ms)
+                };
+                let current = self.view().await;
+                if current.active_device_id != device_id
+                    || !current
+                        .track
+                        .as_ref()
+                        .is_some_and(|t| t.uri == original_track.uri)
+                {
+                    return Err(ConnectError::Conflict);
+                }
+                let position = expected_position();
+                if current.position_ms.abs_diff(position) > 1000 {
+                    if receiving_here {
+                        self.spirc
+                            .set_position_ms(position)
+                            .map_err(|_| ConnectError::Network)?;
+                    } else {
+                        self.remote(
+                            &device_id,
+                            json!({"endpoint":"seek_to","value":position,"position":position}),
+                        )
+                        .await?;
+                    }
+                }
+                return tokio::time::timeout(Duration::from_secs(12), async {
+                    loop {
+                        let current = self.view().await;
+                        if current.active_device_id != device_id
+                            || !current
+                                .track
+                                .as_ref()
+                                .is_some_and(|t| t.uri == original_track.uri)
+                        {
+                            return Err(ConnectError::Conflict);
+                        }
+                        if current.playing == view.playing
+                            && !current.loading
+                            && current.position_ms.abs_diff(expected_position()) <= 2000
+                        {
                             return Ok(());
                         }
                         updates
@@ -1045,7 +1120,12 @@ mod tests {
     fn transferring_to_the_receiver_waits_for_context_resolution_before_another_handoff() {
         let mut m = ConnectModel::new("local".into());
         m.apply(cluster(1));
-        let before = m.view();
+        let mut before = m.view();
+        before.track = Some(ConnectTrack {
+            uri: "spotify:track:4uLU6hMCjMI75M1A2tKUQC".into(),
+            duration_ms: 1000,
+            ..ConnectTrack::default()
+        });
         let mut loading = before.clone();
         loading.active_device_id = "local".into();
         loading.queue.clear();
@@ -1053,5 +1133,8 @@ mod tests {
         loading.queue = before.queue.clone();
         assert!(transfer_ready(&loading, &before, "local"));
         assert!(transfer_ready(&before, &loading, "phone"));
+        let mut different = before.clone();
+        different.track.as_mut().unwrap().uri = "different".into();
+        assert!(!transfer_ready(&different, &before, "phone"));
     }
 }
