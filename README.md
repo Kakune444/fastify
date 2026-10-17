@@ -13,9 +13,10 @@ un compte réel : connexion OAuth, reconnexion après redémarrage, accueil,
 recherche, bibliothèque paginée, albums et playlists, lecture Rust, pause et déplacement dans le morceau.
 Les favoris et l’édition des playlists utilisent aussi les services internes Spotify :
 création privée, nom et description, ajout, retrait d’une occurrence et déplacement.
-La file locale prend en charge la lecture aléatoire, la répétition de la sélection
-ou d’un titre, l’ajout de morceaux et leur réorganisation. Elle reste indépendante
-de la file des autres appareils Spotify Connect.
+Le lecteur utilise désormais Spotify Connect : sélection d’un appareil, transfert,
+commandes à distance et file partagée. L’aléatoire, la répétition, les ajouts et
+les déplacements suivent l’appareil actif. Les vérifications de cette intégration
+sont détaillées dans l’état des fonctions.
 Les autres parcours sont suivis dans [l'état des fonctions](docs/STATUS.md).
 **La parité Spotify n'est pas atteinte et aucun gain de performance global n'est
 encore démontré.**
@@ -59,6 +60,12 @@ répétition : désactivée, sélection entière, titre seul. Le menu « … » 
 un titre à la file d’attente. Dans la file, on peut déplacer les titres, en choisir
 un à lire ensuite ou retirer une occurrence. Cela ne modifie pas la playlist.
 
+Le bouton d’appareil, à côté de la file, ouvre « Se connecter à un appareil ».
+Choisir un appareil y transfère la lecture ; « Spotisloth — Cet ordinateur » la
+ramène ici. Un bandeau vert indique une lecture sur un autre appareil. Les appareils
+doivent être connectés au même compte Spotify. Les commandes indisponibles sur
+l’appareil actif sont désactivées.
+
 ## Suivi
 
 - [Plan et critères de validation](docs/PLAN.md)
@@ -71,3 +78,6 @@ en local dans les dossiers ignorés par Git. Ne jamais les joindre à une issue.
 
 Le moteur audio utilise [librespot](https://github.com/librespot-org/librespot), sous
 licence MIT. Les pochettes et contenus restent fournis par Spotify.
+Une [petite adaptation locale](vendor/librespot-connect/SPOTISLOTH.md) expose les
+états Connect déjà reçus par ce moteur, sans ajouter de requêtes réseau, et corrige
+la désactivation du récepteur lors d’un transfert sortant.
