@@ -115,10 +115,60 @@ fn transfer_ready(current: &ConnectView, previous: &ConnectView, destination: &s
             return false;
         }
     }
-    if destination != current.local_device_id {
-        return true;
+    current.queue.iter().filter(|t| !t.queued).count()
+        >= previous.queue.iter().filter(|t| !t.queued).count().min(3)
+        && current.queue.iter().take_while(|t| t.queued).count()
+            >= previous.queue.iter().take_while(|t| t.queued).count()
+}
+
+/// A receiver can resolve the context at index zero even though it kept the
+/// correct current track. Remove only an unambiguous, already-played context
+/// prefix; never replace a manual queue that changed during the handoff.
+fn stale_context_prefix(previous: &ConnectView, current: &ConnectView) -> Result<Vec<String>> {
+    let a = previous.queue.iter().take_while(|t| t.queued).count();
+    let b = current.queue.iter().take_while(|t| t.queued).count();
+    if a != b
+        || !previous.queue[..a]
+            .iter()
+            .zip(&current.queue[..b])
+            .all(|(x, y)| x.track.uri == y.track.uri)
+    {
+        return Err(ConnectError::Conflict);
     }
-    current.queue.len() >= previous.queue.len().min(2)
+    let expected = &previous.queue[a..];
+    let received = &current.queue[b..];
+    let size = expected.len().min(3);
+    if size == 0 {
+        return Ok(vec![]);
+    }
+    let matches = |slice: &[QueueTrack]| {
+        slice
+            .iter()
+            .zip(&expected[..size])
+            .all(|(x, y)| !x.queued && x.track.uri == y.track.uri)
+    };
+    if received.len() >= size && matches(&received[..size]) {
+        return Ok(vec![]);
+    }
+    let candidates = received
+        .windows(size)
+        .enumerate()
+        .filter(|(_, tracks)| matches(tracks))
+        .map(|(i, _)| i)
+        .collect::<Vec<_>>();
+    if candidates.len() != 1 {
+        return Err(ConnectError::Uncertain);
+    }
+    let skipped = &received[..candidates[0]];
+    if skipped.iter().any(|t| t.queued) {
+        return Err(ConnectError::Conflict);
+    }
+    Ok(skipped.iter().map(|t| t.key.clone()).collect())
+}
+
+fn encode_track(t: &ProvidedTrack) -> Result<Value> {
+    let json = protobuf_json_mapping::print_to_string(t).map_err(|_| ConnectError::Protocol)?;
+    serde_json::from_str(&json).map_err(|_| ConnectError::Protocol)
 }
 
 pub struct ConnectModel {
@@ -563,6 +613,64 @@ impl ConnectRuntime {
         command["logging_params"] = json!({"command_id":uuid::Uuid::new_v4().simple().to_string()});
         self.send(Method::POST,&format!("/connect-state/v1/player/command/from/{}/to/{target}",self.session.device_id()), Some(json!({ "command":command, "message_id":self.message_id.fetch_add(1,Ordering::Relaxed), "sent_by_device_id":self.session.device_id() }))).await
     }
+    async fn restore_transfer_queue(
+        &self,
+        previous: &ConnectView,
+        destination: &str,
+    ) -> Result<()> {
+        let Some(original_track) = &previous.track else {
+            return Ok(());
+        };
+        let model = self.model.lock().await;
+        let current = model.view();
+        if current.active_device_id != destination
+            || !current
+                .track
+                .as_ref()
+                .is_some_and(|t| t.uri == original_track.uri)
+        {
+            return Err(ConnectError::Conflict);
+        }
+        let keys = stale_context_prefix(previous, &current)?;
+        if keys.is_empty() {
+            return Ok(());
+        }
+        let p = &model
+            .cluster
+            .as_ref()
+            .ok_or(ConnectError::NotReady)?
+            .player_state;
+        let mut tracks = p.next_tracks.clone();
+        for key in keys.iter().rev() {
+            tracks.remove(model.queue_index(&current.revision, key)?);
+        }
+        let body = json!({"endpoint":"set_queue","next_tracks":tracks.iter().map(encode_track).collect::<Result<Vec<_>>>()?,"prev_tracks":p.prev_tracks.iter().map(encode_track).collect::<Result<Vec<_>>>()?,"queue_revision":p.queue_revision});
+        drop(model);
+        let mut updates = self.subscribe();
+        self.remote(destination, body).await?;
+        tokio::time::timeout(Duration::from_secs(12), async {
+            loop {
+                let current = self.view().await;
+                if current.active_device_id != destination
+                    || !current
+                        .track
+                        .as_ref()
+                        .is_some_and(|t| t.uri == original_track.uri)
+                {
+                    return Err(ConnectError::Conflict);
+                }
+                if stale_context_prefix(previous, &current)?.is_empty() {
+                    return Ok(());
+                }
+                updates
+                    .changed()
+                    .await
+                    .map_err(|_| ConnectError::Uncertain)?;
+            }
+        })
+        .await
+        .map_err(|_| ConnectError::Uncertain)?
+    }
     pub async fn execute(
         &self,
         action: ConnectAction,
@@ -625,6 +733,7 @@ impl ConnectRuntime {
                 })
                 .await
                 .map_err(|_| ConnectError::Uncertain)??;
+                self.restore_transfer_queue(&view, &device_id).await?;
                 // Some receivers restart the same track at zero or resume a paused
                 // handoff. Restore explicit controls only after ownership and track
                 // identity have been confirmed. Never retry the transfer itself.
@@ -919,24 +1028,19 @@ impl ConnectRuntime {
                     .ok_or(ConnectError::NotReady)?
                     .player_state;
                 let mut tracks = p.next_tracks.clone();
-                let encode = |t: &ProvidedTrack| -> Result<Value> {
-                    let json = protobuf_json_mapping::print_to_string(t)
-                        .map_err(|_| ConnectError::Protocol)?;
-                    serde_json::from_str(&json).map_err(|_| ConnectError::Protocol)
-                };
                 let body = match action {
                     ConnectAction::Jump { .. } => {
                         if view.restrictions.next {
                             return Err(ConnectError::Restricted);
                         }
-                        json!({"endpoint":"skip_next","track":encode(&tracks[index])?})
+                        json!({"endpoint":"skip_next","track":encode_track(&tracks[index])?})
                     }
                     ConnectAction::Remove { .. } => {
                         if view.restrictions.edit_queue {
                             return Err(ConnectError::Restricted);
                         }
                         tracks.remove(index);
-                        json!({"endpoint":"set_queue","next_tracks":tracks.iter().map(encode).collect::<Result<Vec<_>>>()?,"prev_tracks":p.prev_tracks.iter().map(encode).collect::<Result<Vec<_>>>()?,"queue_revision":p.queue_revision})
+                        json!({"endpoint":"set_queue","next_tracks":tracks.iter().map(encode_track).collect::<Result<Vec<_>>>()?,"prev_tracks":p.prev_tracks.iter().map(encode_track).collect::<Result<Vec<_>>>()?,"queue_revision":p.queue_revision})
                     }
                     ConnectAction::Move { to, .. } => {
                         if view.restrictions.edit_queue {
@@ -946,7 +1050,7 @@ impl ConnectRuntime {
                         let to = m.queue_index(&view.revision, &destination.key)?;
                         let t = tracks.remove(index);
                         tracks.insert(to, t);
-                        json!({"endpoint":"set_queue","next_tracks":tracks.iter().map(encode).collect::<Result<Vec<_>>>()?,"prev_tracks":p.prev_tracks.iter().map(encode).collect::<Result<Vec<_>>>()?,"queue_revision":p.queue_revision})
+                        json!({"endpoint":"set_queue","next_tracks":tracks.iter().map(encode_track).collect::<Result<Vec<_>>>()?,"prev_tracks":p.prev_tracks.iter().map(encode_track).collect::<Result<Vec<_>>>()?,"queue_revision":p.queue_revision})
                     }
                     _ => unreachable!(),
                 };
@@ -1136,6 +1240,60 @@ mod tests {
             3
         );
         assert_eq!(m.view().repeat, "all");
+    }
+
+    #[test]
+    fn a_handoff_repairs_only_a_unique_context_offset_and_preserves_manual_entries() {
+        let queue = |items: &[(&str, bool)]| {
+            items
+                .iter()
+                .enumerate()
+                .map(|(i, (uri, queued))| QueueTrack {
+                    key: i.to_string(),
+                    queued: *queued,
+                    track: ConnectTrack {
+                        uri: (*uri).into(),
+                        ..Default::default()
+                    },
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut before = ConnectView::default();
+        before.queue = queue(&[("manual", true), ("c", false), ("d", false), ("e", false)]);
+        let mut current = before.clone();
+        current.queue = queue(&[
+            ("manual", true),
+            ("a", false),
+            ("b", false),
+            ("c", false),
+            ("d", false),
+            ("e", false),
+        ]);
+        assert_eq!(
+            stale_context_prefix(&before, &current).unwrap(),
+            vec!["1", "2"]
+        );
+        current.queue[0].track.uri = "new manual addition".into();
+        assert!(matches!(
+            stale_context_prefix(&before, &current),
+            Err(ConnectError::Conflict)
+        ));
+        current.queue = queue(&[("manual", true), ("c", false), ("d", false), ("e", false)]);
+        assert!(stale_context_prefix(&before, &current).unwrap().is_empty());
+        current.queue = queue(&[
+            ("manual", true),
+            ("a", false),
+            ("c", false),
+            ("d", false),
+            ("e", false),
+            ("c", false),
+            ("d", false),
+            ("e", false),
+        ]);
+        assert!(matches!(
+            stale_context_prefix(&before, &current),
+            Err(ConnectError::Uncertain)
+        ));
     }
 
     #[test]

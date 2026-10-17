@@ -315,6 +315,17 @@ async fn diagnose_connect_actions(
         })
         .await?;
         println!("CONNECT_TRANSFER_RESTORE_OK: position_and_playback_state_preserved");
+        let restored = runtime.view().await;
+        let prefix = initial
+            .queue
+            .iter()
+            .zip(&restored.queue)
+            .take(5)
+            .all(|(a, b)| a.track.uri == b.track.uri && a.queued == b.queued);
+        if !prefix {
+            return Err("Transferred queue prefix differs from the original".into());
+        }
+        println!("CONNECT_TRANSFER_QUEUE_OK: prefix_matches=true");
         inbound?;
     }
     if std::env::args().any(|a| a == "--connect-queue-roundtrip") {
