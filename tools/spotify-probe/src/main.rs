@@ -290,12 +290,14 @@ async fn diagnose_connect_actions(
             println!("CONNECT_TRANSFER_IN_OK: position_and_playback_state_preserved");
         }
         let local = runtime.view().await;
-        let prefix = initial
-            .queue
-            .iter()
-            .zip(&local.queue)
-            .take(5)
-            .all(|(a, b)| a.track.uri == b.track.uri);
+        let prefix_size = initial.queue.len().min(40);
+        let prefix = local.queue.len() >= prefix_size
+            && initial
+                .queue
+                .iter()
+                .zip(&local.queue)
+                .take(prefix_size)
+                .all(|(a, b)| a.track.uri == b.track.uri);
         println!(
             "CONNECT_TRANSFER_SOURCE_READY: queue={} prefix_matches={prefix}",
             local.queue.len()
@@ -316,12 +318,16 @@ async fn diagnose_connect_actions(
         .await?;
         println!("CONNECT_TRANSFER_RESTORE_OK: position_and_playback_state_preserved");
         let restored = runtime.view().await;
-        let prefix = initial
-            .queue
-            .iter()
-            .zip(&restored.queue)
-            .take(5)
-            .all(|(a, b)| a.track.uri == b.track.uri && a.queued == b.queued);
+        if restored.shuffle != initial.shuffle || restored.repeat != initial.repeat {
+            return Err("Transferred playback modes differ from the original".into());
+        }
+        let prefix = restored.queue.len() >= prefix_size
+            && initial
+                .queue
+                .iter()
+                .zip(&restored.queue)
+                .take(prefix_size)
+                .all(|(a, b)| a.track.uri == b.track.uri && a.queued == b.queued);
         if !prefix {
             return Err("Transferred queue prefix differs from the original".into());
         }

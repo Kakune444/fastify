@@ -137,7 +137,7 @@ fn stale_context_prefix(previous: &ConnectView, current: &ConnectView) -> Result
     }
     let expected = &previous.queue[a..];
     let received = &current.queue[b..];
-    let size = expected.len().min(3);
+    let size = expected.len().min(40);
     if size == 0 {
         return Ok(vec![]);
     }
@@ -169,6 +169,58 @@ fn stale_context_prefix(previous: &ConnectView, current: &ConnectView) -> Result
 fn encode_track(t: &ProvidedTrack) -> Result<Value> {
     let json = protobuf_json_mapping::print_to_string(t).map_err(|_| ConnectError::Protocol)?;
     serde_json::from_str(&json).map_err(|_| ConnectError::Protocol)
+}
+
+struct TransferQueue {
+    context: String,
+    next: Vec<ProvidedTrack>,
+    previous: Vec<ProvidedTrack>,
+}
+
+fn same_context(a: &str, b: &str) -> bool {
+    let collection = |s: &str| {
+        s == "spotify:collection:tracks"
+            || (s.starts_with("spotify:user:") && s.ends_with(":collection"))
+    };
+    a == b
+        || (collection(a) && collection(b))
+        || (a.contains(":playlist:")
+            && b.contains(":playlist:")
+            && a.rsplit(':').next() == b.rsplit(':').next())
+}
+
+fn snapshot_tracks(
+    saved: &[ProvidedTrack],
+    receiver: &[ProvidedTrack],
+    local: bool,
+) -> Vec<ProvidedTrack> {
+    let mut tracks = saved.to_vec();
+    if local {
+        for track in &mut tracks {
+            track.metadata.remove("context_index");
+            let candidates = receiver
+                .iter()
+                .filter(|t| t.uri == track.uri && t.metadata.contains_key("context_index"))
+                .collect::<Vec<_>>();
+            let matched = candidates
+                .iter()
+                .find(|t| !track.uid.is_empty() && t.uid == track.uid)
+                .copied()
+                .or_else(|| {
+                    let first = *candidates.first()?;
+                    candidates
+                        .iter()
+                        .all(|t| {
+                            t.metadata.get("context_index") == first.metadata.get("context_index")
+                        })
+                        .then_some(first)
+                });
+            if let Some(index) = matched.and_then(|t| t.metadata.get("context_index")) {
+                track.metadata.insert("context_index".into(), index.clone());
+            }
+        }
+    }
+    tracks
 }
 
 pub struct ConnectModel {
@@ -617,6 +669,7 @@ impl ConnectRuntime {
         &self,
         previous: &ConnectView,
         destination: &str,
+        snapshot: &TransferQueue,
     ) -> Result<()> {
         let Some(original_track) = &previous.track else {
             return Ok(());
@@ -631,20 +684,37 @@ impl ConnectRuntime {
         {
             return Err(ConnectError::Conflict);
         }
-        let keys = stale_context_prefix(previous, &current)?;
-        if keys.is_empty() {
-            return Ok(());
-        }
         let p = &model
             .cluster
             .as_ref()
             .ok_or(ConnectError::NotReady)?
             .player_state;
-        let mut tracks = p.next_tracks.clone();
-        for key in keys.iter().rev() {
-            tracks.remove(model.queue_index(&current.revision, key)?);
+        if !same_context(&snapshot.context, &p.context_uri)
+            || previous.shuffle != current.shuffle
+            || previous.repeat != current.repeat
+        {
+            return Err(ConnectError::Conflict);
         }
-        let body = json!({"endpoint":"set_queue","next_tracks":tracks.iter().map(encode_track).collect::<Result<Vec<_>>>()?,"prev_tracks":p.prev_tracks.iter().map(encode_track).collect::<Result<Vec<_>>>()?,"queue_revision":p.queue_revision});
+        let (tracks, history) = match stale_context_prefix(previous, &current) {
+            Ok(keys) if keys.is_empty() => return Ok(()),
+            Ok(keys) => {
+                let mut tracks = p.next_tracks.clone();
+                for key in keys.iter().rev() {
+                    tracks.remove(model.queue_index(&current.revision, key)?);
+                }
+                (tracks, p.prev_tracks.clone())
+            }
+            Err(ConnectError::Uncertain) => (
+                snapshot_tracks(
+                    &snapshot.next,
+                    &p.next_tracks,
+                    destination == current.local_device_id,
+                ),
+                snapshot.previous.clone(),
+            ),
+            Err(e) => return Err(e),
+        };
+        let body = json!({"endpoint":"set_queue","next_tracks":tracks.iter().map(encode_track).collect::<Result<Vec<_>>>()?,"prev_tracks":history.iter().map(encode_track).collect::<Result<Vec<_>>>()?,"queue_revision":p.queue_revision});
         drop(model);
         let mut updates = self.subscribe();
         self.remote(destination, body).await?;
@@ -659,8 +729,10 @@ impl ConnectRuntime {
                 {
                     return Err(ConnectError::Conflict);
                 }
-                if stale_context_prefix(previous, &current)?.is_empty() {
-                    return Ok(());
+                match stale_context_prefix(previous, &current) {
+                    Ok(keys) if keys.is_empty() => return Ok(()),
+                    Err(ConnectError::Conflict) => return Err(ConnectError::Conflict),
+                    _ => {}
                 }
                 updates
                     .changed()
@@ -711,6 +783,16 @@ impl ConnectRuntime {
                 if device_id == view.active_device_id {
                     return Ok(());
                 }
+                let p = &m
+                    .cluster
+                    .as_ref()
+                    .ok_or(ConnectError::NotReady)?
+                    .player_state;
+                let snapshot = TransferQueue {
+                    context: p.context_uri.clone(),
+                    next: p.next_tracks.clone(),
+                    previous: p.prev_tracks.clone(),
+                };
                 drop(m);
                 let started = Instant::now();
                 self.send(
@@ -733,7 +815,8 @@ impl ConnectRuntime {
                 })
                 .await
                 .map_err(|_| ConnectError::Uncertain)??;
-                self.restore_transfer_queue(&view, &device_id).await?;
+                self.restore_transfer_queue(&view, &device_id, &snapshot)
+                    .await?;
                 // Some receivers restart the same track at zero or resume a paused
                 // handoff. Restore explicit controls only after ownership and track
                 // identity have been confirmed. Never retry the transfer itself.
@@ -1240,6 +1323,37 @@ mod tests {
             3
         );
         assert_eq!(m.view().repeat, "all");
+    }
+
+    #[test]
+    fn snapshot_order_and_occurrence_ids_survive_receiver_index_mapping() {
+        let mut a = ProvidedTrack::new();
+        a.uri = "same track".into();
+        a.uid = "first occurrence".into();
+        let mut b = a.clone();
+        b.uid = "other occurrence".into();
+        b.metadata.insert("context_index".into(), "obsolete".into());
+        let mut first = a.clone();
+        first.metadata.insert("context_index".into(), "3".into());
+        let mut another = first.clone();
+        another.uid = "different receiver occurrence".into();
+        another.metadata.insert("context_index".into(), "8".into());
+        let tracks = snapshot_tracks(&[a.clone(), b.clone()], &[first, another], true);
+        assert_eq!(tracks[0].uid, a.uid);
+        assert_eq!(tracks[1].uid, b.uid);
+        assert_eq!(
+            tracks[0].metadata.get("context_index").map(String::as_str),
+            Some("3")
+        );
+        assert!(!tracks[1].metadata.contains_key("context_index"));
+        assert!(same_context(
+            "spotify:user:owner:playlist:list",
+            "spotify:playlist:list"
+        ));
+        assert!(!same_context(
+            "spotify:playlist:one",
+            "spotify:playlist:two"
+        ));
     }
 
     #[test]
